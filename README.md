@@ -1,4 +1,4 @@
-# Control4 push — форк официальной интеграции для проверки на объекте
+# Control4 push — официальная интеграция Control4 на push
 
 Официальная интеграция `control4` из Home Assistant, переведённая с опроса на push. Состояния
 приходят от директора по WebSocket сразу, а не раз в 5 с. Ставится **поверх** официальной
@@ -32,13 +32,16 @@
 
 Нужен Home Assistant **2026.8+**.
 
-1. Скопировать папку `custom_components/control4` в `/config/custom_components/control4`
-   (Samba, SSH или Studio Code Server).
-2. Перезапустить HA. В журнале будет предупреждение, что пользовательская интеграция
-   `control4` заменяет встроенную, — так и задумано.
+1. HACS → меню ⋮ → **Custom repositories** → `https://github.com/deliriumxp/control4-push`,
+   категория **Integration**.
+2. Найти **Control4 push**, установить, перезапустить HA. В журнале будет предупреждение, что
+   пользовательская интеграция `control4` заменяет встроенную, — так и задумано.
 
-Откат: удалить `/config/custom_components/control4` и перезапустить HA — вернётся встроенная,
-с той же записью и сущностями.
+Без HACS — скопировать папку `custom_components/control4` в `/config/custom_components/control4`
+(Samba, SSH или Studio Code Server) и перезапустить HA.
+
+Откат: удалить в HACS (или стереть `/config/custom_components/control4`) и перезапустить HA —
+вернётся встроенная, с той же записью и сущностями.
 
 Подробный журнал на время проверки (`configuration.yaml`):
 

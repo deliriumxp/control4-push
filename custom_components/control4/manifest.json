@@ -4,6 +4,7 @@
   "codeowners": ["@deliriumxp"],
   "config_flow": true,
   "documentation": "https://github.com/deliriumxp/control4-push",
+  "issue_tracker": "https://github.com/deliriumxp/control4-push/issues",
   "integration_type": "hub",
   "iot_class": "local_push",
   "loggers": ["pyControl4", "socketio_v4", "engineio_v3"],
