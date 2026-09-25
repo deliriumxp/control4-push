@@ -84,7 +84,9 @@ async def test_concurrent_bad_token_only_refreshes_once(
             await both_calls_started.wait()
         raise BadToken("expired")
 
-    async def _fake_refresh_tokens(hass: HomeAssistant, entry: MockConfigEntry) -> None:
+    async def _fake_refresh_tokens(
+        hass: HomeAssistant, entry: MockConfigEntry, *, force: bool = False
+    ) -> None:
         nonlocal token_valid
         token_valid = True
 

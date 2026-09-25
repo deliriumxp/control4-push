@@ -40,8 +40,18 @@ CONF_CONTROLLER_UNIQUE_ID = "controller_unique_id"
 
 CONTROL4_ENTITY_TYPE = 7
 
-RETRY_BACKOFF_MAX_SEC = 30
-SCHEDULE_REFRESH_ADVANCE_SEC = 300
+# Director token lifecycle (token_store.py). The token lives validSeconds (24 h).
+CONF_TOKEN_EXPIRES = "token_expires"
+CONF_DIRECTOR_SW_VERSION = "director_sw_version"
+# Start with a saved token only if it has at least this much life left.
+MIN_STORED_TOKEN_LIFE_SEC = 3600
+# Refresh starts this long before expiry: half the token's life is left for retries,
+# because access to Control4 resources from Russia can be down for hours.
+TOKEN_REFRESH_WINDOW_SEC = 12 * 3600
+# Failed refresh: retry after 1, 2, 4 ... minutes, then every 30 minutes until it works.
+TOKEN_RETRY_FIRST_SEC = 60
+TOKEN_RETRY_MAX_SEC = 1800
+CLOUD_REQUEST_TIMEOUT_SEC = 30
 
 DEFAULT_SCAN_INTERVAL = 5
 WEBSOCKET_RESYNC_INTERVAL_SEC = 60

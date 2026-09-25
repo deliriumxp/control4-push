@@ -7,16 +7,15 @@ import random
 from typing import Any
 
 from aiohttp import client_exceptions
-from pyControl4.account import C4Account
 from pyControl4.director import C4Director
-from pyControl4.error_handling import BadCredentials, InvalidCategory
+from pyControl4.error_handling import BadToken, C4Exception, InvalidCategory
+
+from . import token_store
 from .director_websocket import DirectorWebsocket
 
 from homeassistant.const import (
     CONF_HOST,
-    CONF_PASSWORD,
     CONF_TOKEN,
-    CONF_USERNAME,
     Platform,
 )
 from homeassistant.core import HomeAssistant
@@ -27,8 +26,9 @@ from homeassistant.helpers.event import async_call_later, async_track_time_inter
 from .const import (
     CONF_CONTROLLER_UNIQUE_ID,
     DOMAIN,
-    RETRY_BACKOFF_MAX_SEC,
-    SCHEDULE_REFRESH_ADVANCE_SEC,
+    TOKEN_REFRESH_WINDOW_SEC,
+    TOKEN_RETRY_FIRST_SEC,
+    TOKEN_RETRY_MAX_SEC,
     WEBSOCKET_RESYNC_INTERVAL_SEC,
     Control4ConfigEntry,
     Control4RuntimeData,
@@ -40,47 +40,26 @@ _LOGGER = logging.getLogger(__name__)
 PLATFORMS = [Platform.CLIMATE, Platform.COVER, Platform.LIGHT, Platform.MEDIA_PLAYER]
 
 
-async def _fetch_tokens(
-    hass: HomeAssistant, entry: Control4ConfigEntry
-) -> tuple[C4Account, C4Director, dict[str, Any]]:
-    """Fetch fresh account + director bearer tokens."""
-    config = entry.data
-    session = aiohttp_client.async_get_clientsession(hass)
-
-    account = C4Account(config[CONF_USERNAME], config[CONF_PASSWORD], session)
-    try:
-        await account.get_account_bearer_token()
-    except (TimeoutError, client_exceptions.ClientError) as err:
-        raise ConfigEntryNotReady(err) from err
-    except BadCredentials as err:
-        raise ConfigEntryAuthFailed(err) from err
-
-    controller_unique_id = config[CONF_CONTROLLER_UNIQUE_ID]
-    try:
-        director_token_dict = await account.get_director_bearer_token(
-            controller_unique_id
-        )
-    except (TimeoutError, client_exceptions.ClientError) as err:
-        raise ConfigEntryNotReady(err) from err
-
-    no_verify_session = aiohttp_client.async_get_clientsession(hass, verify_ssl=False)
-    director = C4Director(
-        config[CONF_HOST], director_token_dict[CONF_TOKEN], no_verify_session
+def _director(hass: HomeAssistant, entry: Control4ConfigEntry, token: str) -> C4Director:
+    return C4Director(
+        entry.data[CONF_HOST],
+        token,
+        aiohttp_client.async_get_clientsession(hass, verify_ssl=False),
     )
-    return account, director, director_token_dict
 
 
-def _schedule_next_refresh(
-    hass: HomeAssistant, entry: Control4ConfigEntry, valid_seconds: int
-) -> None:
-    """Schedule the next token refresh and, once, the periodic resync poll."""
+def _schedule_next_refresh(hass: HomeAssistant, entry: Control4ConfigEntry) -> None:
+    """Schedule the token refresh and, once, the periodic resync poll.
+
+    The refresh starts TOKEN_REFRESH_WINDOW_SEC before the saved token expires, leaving
+    that much time for retries when the Control4 cloud can't be reached.
+    """
     runtime_data = entry.runtime_data
-    delay = max(
-        valid_seconds - SCHEDULE_REFRESH_ADVANCE_SEC, SCHEDULE_REFRESH_ADVANCE_SEC
-    )
-    obj = RefreshTokensObject(hass, entry)
+    if runtime_data.cancel_token_refresh_callback is not None:
+        runtime_data.cancel_token_refresh_callback()
+    delay = max(token_store.seconds_left(entry) - TOKEN_REFRESH_WINDOW_SEC, 0)
     runtime_data.cancel_token_refresh_callback = async_call_later(
-        hass=hass, delay=delay, action=obj.refresh_tokens
+        hass=hass, delay=delay, action=RefreshTokensObject(hass, entry).refresh_tokens
     )
     # Only needed once, on initial setup.
     if runtime_data.cancel_periodic_resync_callback is None:
@@ -92,8 +71,23 @@ def _schedule_next_refresh(
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: Control4ConfigEntry) -> bool:
-    """Set up Control4 from a config entry."""
-    account, director, director_token_dict = await _fetch_tokens(hass, entry)
+    """Set up Control4 from a config entry.
+
+    Starts from the token saved in the entry when it has life left, so a restart needs
+    only the Director; the cloud is asked when there is no usable token or the Director
+    rejects the saved one (see token_store).
+    """
+    token = token_store.stored_token(entry)
+    if token is None:
+        account, token_dict = await token_store.fetch_cloud_token(hass, entry)
+        token = token_dict[CONF_TOKEN]
+    else:
+        account = token_store.account_for(hass, entry)
+        _LOGGER.debug(
+            "Starting with the saved director token (%.1f h left)",
+            token_store.seconds_left(entry) / 3600,
+        )
+    director = _director(hass, entry, token)
 
     if hasattr(entry, "runtime_data"):
         # A retry of a previously-failed setup reuses that attempt's WebSocket.
@@ -114,24 +108,34 @@ async def async_setup_entry(hass: HomeAssistant, entry: Control4ConfigEntry) -> 
         entry.runtime_data = runtime_data
 
     try:
-        await runtime_data.websocket.sio_connect(director.director_bearer_token)
-    except Exception as err:
-        raise ConfigEntryNotReady(err) from err
-
-    _schedule_next_refresh(hass, entry, director_token_dict["validSeconds"])
-
-    try:
         controller_unique_id = entry.data[CONF_CONTROLLER_UNIQUE_ID]
+        try:
+            try:
+                director_all_items = await runtime_data.director.get_all_item_info()
+            except BadToken:
+                _LOGGER.info(
+                    "The Director rejected the saved token; getting a new one from"
+                    " the Control4 cloud"
+                )
+                account, token_dict = await token_store.fetch_cloud_token(hass, entry)
+                runtime_data.account = account
+                runtime_data.director = _director(hass, entry, token_dict[CONF_TOKEN])
+                director_all_items = await runtime_data.director.get_all_item_info()
+        except (TimeoutError, client_exceptions.ClientError, C4Exception) as err:
+            raise ConfigEntryNotReady(err) from err
 
         try:
-            controller_href = (await runtime_data.account.get_account_controllers())[
-                "href"
-            ]
-            director_sw_version = await runtime_data.account.get_controller_os_version(
-                controller_href
+            await runtime_data.websocket.sio_connect(
+                runtime_data.director.director_bearer_token
             )
-        except (TimeoutError, client_exceptions.ClientError) as err:
+        except Exception as err:
             raise ConfigEntryNotReady(err) from err
+
+        _schedule_next_refresh(hass, entry)
+
+        director_sw_version = await token_store.director_version(
+            hass, entry, runtime_data.account
+        )
 
         _, model, mac_address = controller_unique_id.split("_", 3)
         director_model = model.upper()
@@ -145,11 +149,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: Control4ConfigEntry) -> 
             model=director_model,
             sw_version=director_sw_version,
         )
-
-        try:
-            director_all_items = await runtime_data.director.get_all_item_info()
-        except (TimeoutError, client_exceptions.ClientError) as err:
-            raise ConfigEntryNotReady(err) from err
 
         # Control4 OS 2 controllers do not support the UI configuration endpoint.
         ui_configuration = None
@@ -218,22 +217,30 @@ async def get_items_of_category(
         return []
 
 
-async def refresh_tokens(hass: HomeAssistant, entry: Control4ConfigEntry) -> None:
-    """Refresh account + director tokens and reconnect the existing WebSocket."""
-    account, director, director_token_dict = await _fetch_tokens(hass, entry)
+async def refresh_tokens(
+    hass: HomeAssistant, entry: Control4ConfigEntry, *, force: bool = False
+) -> None:
+    """Get a new director token and reconnect the WebSocket with it.
 
+    Without `force`, a saved token that is still outside the refresh window is reused -
+    the retry after a failed WebSocket reconnect must not go to the cloud again. `force`
+    is for the Director having rejected the current token (BadToken).
+    """
     runtime_data = entry.runtime_data
-    if runtime_data.cancel_token_refresh_callback is not None:
-        runtime_data.cancel_token_refresh_callback()
-    runtime_data.account = account
-    runtime_data.director = director
+    if not force and token_store.seconds_left(entry) > TOKEN_REFRESH_WINDOW_SEC:
+        token = entry.data[CONF_TOKEN]
+    else:
+        account, token_dict = await token_store.fetch_cloud_token(hass, entry)
+        runtime_data.account = account
+        token = token_dict[CONF_TOKEN]
+    runtime_data.director = _director(hass, entry, token)
 
     try:
-        await runtime_data.websocket.sio_connect(director.director_bearer_token)
+        await runtime_data.websocket.sio_connect(token)
     except Exception as err:
         raise ConfigEntryNotReady(err) from err
 
-    _schedule_next_refresh(hass, entry, director_token_dict["validSeconds"])
+    _schedule_next_refresh(hass, entry)
 
 
 async def _resync_items(hass: HomeAssistant, entry: Control4ConfigEntry) -> None:
@@ -330,35 +337,66 @@ class RefreshTokensObject:
         self.entry = entry
         self.retries = 0
 
-    def _retry_later(self) -> None:
+    def _schedule_retry(self, delay: float) -> None:
         # Only one pending refresh may exist: unload and the next refresh cancel just this one.
         if (cancel := self.entry.runtime_data.cancel_token_refresh_callback) is not None:
             cancel()
-        self.retries += 1
-        delay = random.uniform(0, min(2**self.retries, RETRY_BACKOFF_MAX_SEC))
-        _LOGGER.warning("Token refresh failed, retrying in %.0f seconds", delay)
         self.entry.runtime_data.cancel_token_refresh_callback = async_call_later(
             hass=self.hass, delay=delay, action=self.refresh_tokens
         )
 
+    def _retry_later(self, err: BaseException) -> None:
+        self.retries += 1
+        delay = min(
+            TOKEN_RETRY_FIRST_SEC * 2 ** (self.retries - 1), TOKEN_RETRY_MAX_SEC
+        ) * random.uniform(0.8, 1.2)
+        left = token_store.seconds_left(self.entry)
+        if left > 0:
+            _LOGGER.warning(
+                "Could not refresh the Control4 director token (attempt %d): %s."
+                " Next attempt in %.0f min; the current token is valid for %.1f h more",
+                self.retries,
+                err,
+                delay / 60,
+                left / 3600,
+            )
+        else:
+            _LOGGER.error(
+                "The Control4 director token has EXPIRED and could not be refreshed"
+                " (attempt %d): %s. Push updates and commands stop until it is;"
+                " next attempt in %.0f min",
+                self.retries,
+                err,
+                delay / 60,
+            )
+        self._schedule_retry(delay)
+
     async def refresh_tokens(self, _datetime: Any) -> None:
-        """Refresh tokens; retry with exponential backoff on failure.
+        """Refresh the token; on failure retry with backoff and say so in the log.
 
         Every path either reschedules or hands over to reauth: a dropped chain means the
-        Director silently stops pushing once the token expires (~24 h).
+        Director silently stops pushing once the token expires.
         """
         token_refresh_lock = self.entry.runtime_data.token_refresh_lock
         if token_refresh_lock.locked():
             # A BadToken-triggered refresh is running. On success it cancels this retry
             # and schedules the next refresh itself; if it fails, the retry takes over.
-            self._retry_later()
+            self._schedule_retry(TOKEN_RETRY_FIRST_SEC)
             return
         async with token_refresh_lock:
             try:
                 await refresh_tokens(self.hass, self.entry)
             except ConfigEntryAuthFailed:
-                _LOGGER.error("Control4 credentials are no longer valid")
+                _LOGGER.error(
+                    "Control4 rejected the account credentials; the director token"
+                    " was not refreshed. Enter the new password in the repair prompt"
+                )
                 self.entry.async_start_reauth(self.hass)
             except Exception as err:  # noqa: BLE001 - anything else: keep the chain alive
-                _LOGGER.debug("Token refresh error: %s", err)
-                self._retry_later()
+                self._retry_later(err)
+            else:
+                if self.retries:
+                    _LOGGER.info(
+                        "Control4 director token refreshed after %d failed attempts",
+                        self.retries,
+                    )

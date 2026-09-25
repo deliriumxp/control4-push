@@ -51,6 +51,15 @@ def mock_config_entry() -> MockConfigEntry:
     )
 
 
+@pytest.fixture(autouse=True)
+def mock_broker_version(aioclient_mock) -> None:
+    """The controller's broker answers /api/v1/version locally, without a token."""
+    aioclient_mock.get(
+        f"https://{MOCK_HOST}/api/v1/version",
+        json=[{"name": "Director", "version": "3.2.0"}],
+    )
+
+
 @pytest.fixture
 def mock_setup_entry() -> Generator[AsyncMock]:
     """Mock control4 setup entry."""
@@ -65,7 +74,7 @@ def mock_c4_account() -> Generator[MagicMock]:
     """Mock a Control4 Account client."""
     with (
         patch(
-            "custom_components.control4.C4Account", autospec=True
+            "custom_components.control4.token_store.C4Account", autospec=True
         ) as mock_account_class,
         patch(
             "custom_components.control4.config_flow.C4Account",

@@ -53,7 +53,7 @@ async def _with_token_refresh[T](
             _LOGGER.debug("Updating Control4 director token")
             from . import refresh_tokens  # noqa: PLC0415
 
-            await refresh_tokens(hass, entry)
+            await refresh_tokens(hass, entry, force=True)
 
     return await call()
 
