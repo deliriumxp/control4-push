@@ -4,7 +4,7 @@ import logging
 from typing import Any, override
 
 from aiohttp.client_exceptions import ClientError
-import probatio
+import voluptuous as vol
 from pyControl4.account import C4Account
 from pyControl4.director import C4Director
 from pyControl4.error_handling import BadCredentials, NotFound, Unauthorized
@@ -18,11 +18,11 @@ from .const import CONF_CONTROLLER_UNIQUE_ID, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
-DATA_SCHEMA = probatio.Schema(
+DATA_SCHEMA = vol.Schema(
     {
-        probatio.Required(CONF_HOST): str,
-        probatio.Required(CONF_USERNAME): str,
-        probatio.Required(CONF_PASSWORD): str,
+        vol.Required(CONF_HOST): str,
+        vol.Required(CONF_USERNAME): str,
+        vol.Required(CONF_PASSWORD): str,
     }
 )
 

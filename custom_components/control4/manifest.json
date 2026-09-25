@@ -1,16 +1,17 @@
 {
   "domain": "control4",
   "name": "Control4",
-  "codeowners": ["@lawtancool", "@davidrecordon"],
+  "codeowners": ["@deliriumxp"],
   "config_flow": true,
-  "documentation": "https://www.home-assistant.io/integrations/control4",
+  "documentation": "https://github.com/deliriumxp/control4-push",
   "integration_type": "hub",
   "iot_class": "local_push",
-  "loggers": ["pyControl4"],
+  "loggers": ["pyControl4", "socketio_v4", "engineio_v3"],
   "requirements": ["pyControl4==2.0.2"],
   "ssdp": [
     {
       "st": "c4:director"
     }
-  ]
+  ],
+  "version": "0.1.0"
 }

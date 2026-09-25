@@ -6,14 +6,28 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from homeassistant.components.control4.const import DOMAIN
+from custom_components.control4.const import DOMAIN
 from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_USERNAME, Platform
 
-from tests.common import (
+from pytest_homeassistant_custom_component.syrupy import HomeAssistantSnapshotExtension
+from syrupy.assertion import SnapshotAssertion
+
+from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
     load_json_array_fixture,
     load_json_object_fixture,
 )
+
+@pytest.fixture(autouse=True)
+def auto_enable_custom_integrations(enable_custom_integrations: None) -> None:
+    """Load custom_components/control4 instead of the built-in integration."""
+
+
+@pytest.fixture
+def snapshot(snapshot: SnapshotAssertion) -> SnapshotAssertion:
+    """Serialize like core's tests: registry entries and states as HA snapshots."""
+    return snapshot.use_extension(HomeAssistantSnapshotExtension)
+
 
 MOCK_HOST = "192.168.1.100"
 MOCK_USERNAME = "test-username"
@@ -41,7 +55,7 @@ def mock_config_entry() -> MockConfigEntry:
 def mock_setup_entry() -> Generator[AsyncMock]:
     """Mock control4 setup entry."""
     with patch(
-        "homeassistant.components.control4.async_setup_entry", return_value=True
+        "custom_components.control4.async_setup_entry", return_value=True
     ) as mock_setup:
         yield mock_setup
 
@@ -51,10 +65,10 @@ def mock_c4_account() -> Generator[MagicMock]:
     """Mock a Control4 Account client."""
     with (
         patch(
-            "homeassistant.components.control4.C4Account", autospec=True
+            "custom_components.control4.C4Account", autospec=True
         ) as mock_account_class,
         patch(
-            "homeassistant.components.control4.config_flow.C4Account",
+            "custom_components.control4.config_flow.C4Account",
             new=mock_account_class,
         ),
     ):
@@ -79,10 +93,10 @@ def mock_c4_director() -> Generator[MagicMock]:
     """Mock a Control4 Director client."""
     with (
         patch(
-            "homeassistant.components.control4.C4Director", autospec=True
+            "custom_components.control4.C4Director", autospec=True
         ) as mock_director_class,
         patch(
-            "homeassistant.components.control4.config_flow.C4Director",
+            "custom_components.control4.config_flow.C4Director",
             new=mock_director_class,
         ),
     ):
@@ -112,7 +126,7 @@ def mock_c4_websocket() -> Generator[MagicMock]:
             callbacks.remove(callback)
 
     with patch(
-        "homeassistant.components.control4.C4Websocket", autospec=True
+        "custom_components.control4.DirectorWebsocket", autospec=True
     ) as mock_ws_class:
         mock_ws = mock_ws_class.return_value
         mock_ws.sio_connect = AsyncMock()
@@ -155,7 +169,7 @@ def mock_update_variables() -> Generator[AsyncMock]:
         }
 
     with patch(
-        "homeassistant.components.control4.media_player.update_variables_for_config_entry",
+        "custom_components.control4.media_player.update_variables_for_config_entry",
         new=_mock_update_variables,
     ) as mock_update:
         yield mock_update
@@ -200,7 +214,7 @@ def mock_climate_update_variables(
 def mock_c4_climate() -> Generator[MagicMock]:
     """Mock C4Climate class."""
     with patch(
-        "homeassistant.components.control4.climate.C4Climate", autospec=True
+        "custom_components.control4.climate.C4Climate", autospec=True
     ) as mock_class:
         mock_instance = mock_class.return_value
         mock_instance.set_hvac_mode = AsyncMock()
@@ -221,5 +235,5 @@ def platforms() -> list[Platform]:
 @pytest.fixture(autouse=True)
 async def mock_patch_platforms(platforms: list[Platform]) -> AsyncGenerator[None]:
     """Fixture to set up platforms for tests."""
-    with patch("homeassistant.components.control4.PLATFORMS", platforms):
+    with patch("custom_components.control4.PLATFORMS", platforms):
         yield

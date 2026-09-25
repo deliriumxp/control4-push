@@ -10,7 +10,7 @@ from aiohttp import client_exceptions
 from pyControl4.account import C4Account
 from pyControl4.director import C4Director
 from pyControl4.error_handling import BadCredentials, C4Exception, InvalidCategory
-from pyControl4.websocket import C4Websocket
+from .director_websocket import DirectorWebsocket
 
 from homeassistant.const import (
     CONF_HOST,
@@ -102,7 +102,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: Control4ConfigEntry) -> 
         runtime_data.director = director
     else:
         connection_tracker = C4WebsocketConnectionTracker(hass, entry)
-        websocket = C4Websocket(
+        websocket = DirectorWebsocket(
             entry.data[CONF_HOST],
             aiohttp_client.async_get_clientsession(hass, verify_ssl=False),
             connection_tracker.connect_callback,

@@ -6,7 +6,7 @@ from typing import Any
 
 from pyControl4.account import C4Account
 from pyControl4.director import C4Director
-from pyControl4.websocket import C4Websocket
+from .director_websocket import DirectorWebsocket
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import CALLBACK_TYPE
@@ -20,7 +20,7 @@ class Control4RuntimeData:
 
     account: C4Account
     director: C4Director
-    websocket: C4Websocket
+    websocket: DirectorWebsocket
     controller_unique_id: str = ""
     director_sw_version: str = ""
     director_model: str = ""

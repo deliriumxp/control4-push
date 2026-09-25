@@ -9,7 +9,7 @@ from freezegun.api import FrozenDateTimeFactory
 import pytest
 from syrupy.assertion import SnapshotAssertion
 
-from homeassistant.components.control4.const import WEBSOCKET_RESYNC_INTERVAL_SEC
+from custom_components.control4.const import WEBSOCKET_RESYNC_INTERVAL_SEC
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
     ATTR_TRANSITION,
@@ -24,7 +24,7 @@ from homeassistant.util.color import brightness_to_value, value_to_brightness
 
 from . import setup_integration
 
-from tests.common import MockConfigEntry, async_fire_time_changed, snapshot_platform
+from pytest_homeassistant_custom_component.common import MockConfigEntry, async_fire_time_changed, snapshot_platform
 
 CONTROL4_BRIGHTNESS_SCALE = (1, 100)
 
@@ -75,7 +75,7 @@ def mock_light_update_variables(
 def mock_c4_light() -> Generator[MagicMock]:
     """Mock C4Light class."""
     with patch(
-        "homeassistant.components.control4.light.C4Light", autospec=True
+        "custom_components.control4.light.C4Light", autospec=True
     ) as mock_class:
         mock_instance = mock_class.return_value
         mock_instance.ramp_to_level = AsyncMock()

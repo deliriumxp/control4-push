@@ -27,7 +27,7 @@ from homeassistant.util.unit_system import US_CUSTOMARY_SYSTEM
 
 from . import setup_integration
 
-from tests.common import MockConfigEntry, snapshot_platform
+from pytest_homeassistant_custom_component.common import MockConfigEntry, snapshot_platform
 
 ENTITY_ID = "climate.test_controller_residential_thermostat_v2"
 

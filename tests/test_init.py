@@ -6,8 +6,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from pyControl4.error_handling import BadToken
 import pytest
 
-from homeassistant.components.control4 import RefreshTokensObject, _periodic_resync
-from homeassistant.components.control4.director_utils import (
+from custom_components.control4 import RefreshTokensObject, _periodic_resync
+from custom_components.control4.director_utils import (
     director_get_entry_variables,
     gather_entry_variables,
     to_bool,
@@ -18,7 +18,7 @@ from homeassistant.util import dt as dt_util
 
 from . import setup_integration
 
-from tests.common import MockConfigEntry
+from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 
 @pytest.fixture
@@ -43,7 +43,7 @@ async def test_periodic_resync_skips_when_already_running(
         await release_resync.wait()
 
     with patch(
-        "homeassistant.components.control4._resync_items",
+        "custom_components.control4._resync_items",
         new=AsyncMock(side_effect=_slow_resync_items),
     ) as mock_resync:
         first_tick = hass.async_create_task(
@@ -89,7 +89,7 @@ async def test_concurrent_bad_token_only_refreshes_once(
     mock_c4_director.get_item_variables = AsyncMock(side_effect=_get_item_variables)
 
     with patch(
-        "homeassistant.components.control4.refresh_tokens",
+        "custom_components.control4.refresh_tokens",
         new=AsyncMock(side_effect=_fake_refresh_tokens),
     ) as mock_refresh:
         await asyncio.wait_for(
@@ -123,7 +123,7 @@ async def test_scheduled_refresh_skips_when_lock_already_held(
     await holder_has_lock.wait()
 
     with patch(
-        "homeassistant.components.control4.refresh_tokens", new=AsyncMock()
+        "custom_components.control4.refresh_tokens", new=AsyncMock()
     ) as mock_refresh:
         obj = RefreshTokensObject(hass, mock_config_entry)
         await obj.refresh_tokens(dt_util.utcnow())
