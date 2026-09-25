@@ -229,9 +229,18 @@ class Control4Room(Control4CoordinatorEntity, MediaPlayerEntity):
         """
         return C4Room(self.entry_data.director, self._idx)
 
+    @property
+    def _room_data(self) -> dict[str, Any]:
+        """This room's variables; empty if the fetch failed or the room lacks them.
+
+        get_all_item_variable_value only returns variables a room has, and a failed
+        first refresh leaves coordinator.data as None.
+        """
+        return (self.coordinator.data or {}).get(self._idx) or {}
+
     def _get_device_from_variable(self, var: str) -> int | None:
-        current_device = self.coordinator.data[self._idx][var]
-        if current_device == 0:
+        current_device = self._room_data.get(var)
+        if not current_device:
             return None
 
         return current_device
@@ -250,15 +259,15 @@ class Control4Room(Control4CoordinatorEntity, MediaPlayerEntity):
 
     def _get_media_info(self) -> dict | None:
         """Get the Media Info Dictionary if populated."""
-        media_info = self.coordinator.data[self._idx][CONTROL4_MEDIA_INFO]
-        if "mediainfo" in media_info:
+        media_info = self._room_data.get(CONTROL4_MEDIA_INFO)
+        if isinstance(media_info, dict) and "mediainfo" in media_info:
             return media_info["mediainfo"]
         return None
 
     def _get_current_source_state(self) -> MediaPlayerState | None:
         current_source = self._get_current_playing_device_id()
         while current_source:
-            current_data = self.coordinator.data.get(current_source, None)
+            current_data = (self.coordinator.data or {}).get(current_source, None)
             if current_data:
                 if current_data.get(CONTROL4_PLAYING, None):
                     return MediaPlayerState.PLAYING
@@ -295,7 +304,7 @@ class Control4Room(Control4CoordinatorEntity, MediaPlayerEntity):
         if source_state := self._get_current_source_state():
             return source_state
 
-        if self.coordinator.data[self._idx][CONTROL4_POWER_STATE]:
+        if self._room_data.get(CONTROL4_POWER_STATE):
             return MediaPlayerState.ON
 
         return MediaPlayerState.IDLE
@@ -355,13 +364,15 @@ class Control4Room(Control4CoordinatorEntity, MediaPlayerEntity):
     @override
     def volume_level(self) -> float | None:
         """Get the volume level."""
-        return self.coordinator.data[self._idx][CONTROL4_VOLUME_STATE] / 100
+        volume = self._room_data.get(CONTROL4_VOLUME_STATE)
+        return volume / 100 if isinstance(volume, (int, float)) else None
 
     @property
     @override
     def is_volume_muted(self) -> bool | None:
         """Check if the volume is muted."""
-        return bool(self.coordinator.data[self._idx][CONTROL4_MUTED_STATE])
+        muted = self._room_data.get(CONTROL4_MUTED_STATE)
+        return None if muted is None else bool(muted)
 
     @override
     async def async_select_source(self, source: str) -> None:

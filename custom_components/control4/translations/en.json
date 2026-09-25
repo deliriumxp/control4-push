@@ -1,7 +1,9 @@
 {
   "config": {
     "abort": {
-      "already_configured": "Device is already configured"
+      "already_configured": "Device is already configured",
+      "reauth_successful": "Re-authentication was successful",
+      "wrong_controller": "This account's controller is not the one this entry was set up for"
     },
     "error": {
       "cannot_connect": "Failed to connect to the Control4 director at {host}",
@@ -18,6 +20,14 @@
           "username": "Username"
         },
         "description": "Please enter your Control4 account details and the IP address of your local controller."
+      },
+      "reauth_confirm": {
+        "title": "Control4 sign-in expired",
+        "description": "Enter the current password of your Control4 account.",
+        "data": {
+          "username": "Username",
+          "password": "Password"
+        }
       }
     }
   },

@@ -64,12 +64,21 @@ class _DirectorSocketIOClient(socketio.AsyncClient):
 
     def __init__(self, *, connector: aiohttp.BaseConnector) -> None:
         self._connector = connector
+        self._closing = False
         # ssl_verify=True: engineio must not build its own context, the connector's applies.
         super().__init__(ssl_verify=True)
 
     @override
     def _engineio_v3_client_class(self) -> Any:
         return functools.partial(_DirectorEngineIOClient, connector=self._connector)
+
+    @override
+    async def _handle_reconnect(self) -> None:
+        # The loop starts by clearing the abort event, so an abort set before the task
+        # got its first turn would be lost; a closing client never starts a loop.
+        if self._closing:
+            return
+        await super()._handle_reconnect()
 
     @override
     async def disconnect(self) -> None:
@@ -79,6 +88,7 @@ class _DirectorSocketIOClient(socketio.AsyncClient):
         # Cancelling alone doesn't stop it - the loop swallows CancelledError while it
         # sleeps between attempts. The abort event makes it exit at that sleep; cancel
         # only if it is stuck inside a connect attempt, where cancellation propagates.
+        self._closing = True
         task = self._reconnect_task
         if task is not None and not task.done():
             self._reconnect_abort.set()

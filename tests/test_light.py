@@ -425,7 +425,8 @@ async def test_light_periodic_resync(
 
     freezer.tick(timedelta(seconds=WEBSOCKET_RESYNC_INTERVAL_SEC))
     async_fire_time_changed(hass)
-    await hass.async_block_till_done()
+    # The interval job is a background task; the resync fetches items concurrently.
+    await hass.async_block_till_done(wait_background_tasks=True)
 
     state = hass.states.get(DIMMER_ENTITY_ID)
     assert state is not None

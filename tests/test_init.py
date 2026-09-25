@@ -107,7 +107,11 @@ async def test_scheduled_refresh_skips_when_lock_already_held(
     hass: HomeAssistant,
     mock_config_entry: MockConfigEntry,
 ) -> None:
-    """A scheduled refresh must not race a BadToken-triggered one held by another task."""
+    """A scheduled refresh must not race a BadToken-triggered one held by another task.
+
+    It must not drop the chain either: it schedules a retry, which the other refresh
+    cancels on success and which takes over if that refresh fails.
+    """
     await setup_integration(hass, mock_config_entry)
 
     lock = mock_config_entry.runtime_data.token_refresh_lock
@@ -128,6 +132,10 @@ async def test_scheduled_refresh_skips_when_lock_already_held(
         obj = RefreshTokensObject(hass, mock_config_entry)
         await obj.refresh_tokens(dt_util.utcnow())
         mock_refresh.assert_not_called()
+
+    retry = mock_config_entry.runtime_data.cancel_token_refresh_callback
+    assert retry is not None
+    retry()
 
     release_holder.set()
     await holder_task

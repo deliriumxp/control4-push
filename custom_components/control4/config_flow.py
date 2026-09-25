@@ -1,5 +1,6 @@
 """Config flow for Control4 integration."""
 
+from collections.abc import Mapping
 import logging
 from typing import Any, override
 
@@ -127,6 +128,47 @@ class Control4ConfigFlow(ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="user",
             data_schema=DATA_SCHEMA,
+            errors=errors,
+            description_placeholders=description_placeholders,
+        )
+
+    @override
+    async def async_step_reauth(
+        self, entry_data: Mapping[str, Any]
+    ) -> ConfigFlowResult:
+        """Start reauth: setup or a token refresh raised ConfigEntryAuthFailed."""
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Ask for new account credentials; keep the entry, its entities and options."""
+        reauth_entry = self._get_reauth_entry()
+        errors: dict[str, str] = {}
+        description_placeholders: dict[str, str] = {}
+
+        if user_input is not None:
+            errors, data, description_placeholders = await self._async_try_connect(
+                {CONF_HOST: reauth_entry.data[CONF_HOST], **user_input}
+            )
+            if not errors and data is not None:
+                mac = (data[CONF_CONTROLLER_UNIQUE_ID].split("_", 3))[2]
+                await self.async_set_unique_id(format_mac(mac))
+                self._abort_if_unique_id_mismatch(reason="wrong_controller")
+                return self.async_update_reload_and_abort(
+                    reauth_entry, data_updates=data
+                )
+
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_USERNAME, default=reauth_entry.data[CONF_USERNAME]
+                    ): str,
+                    vol.Required(CONF_PASSWORD): str,
+                }
+            ),
             errors=errors,
             description_placeholders=description_placeholders,
         )
