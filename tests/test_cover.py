@@ -1,0 +1,522 @@
+"""Test Control4 Cover."""
+
+import asyncio
+from collections.abc import Generator
+from datetime import timedelta
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
+
+from pyControl4.error_handling import BadToken
+import pytest
+from syrupy.assertion import SnapshotAssertion
+
+from homeassistant.components.control4.const import WEBSOCKET_RESYNC_INTERVAL_SEC
+from homeassistant.components.cover import (
+    ATTR_CURRENT_POSITION,
+    ATTR_POSITION,
+    DOMAIN as COVER_DOMAIN,
+    SERVICE_CLOSE_COVER,
+    SERVICE_OPEN_COVER,
+    SERVICE_SET_COVER_POSITION,
+    SERVICE_STOP_COVER,
+    CoverState,
+)
+from homeassistant.const import ATTR_ENTITY_ID, STATE_UNAVAILABLE, Platform
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
+from homeassistant.util import dt as dt_util
+
+from . import setup_integration
+
+from tests.common import MockConfigEntry, async_fire_time_changed, snapshot_platform
+
+ENTITY_ID = "cover.test_controller_living_room_shade"
+
+
+def _make_cover_data(
+    level: int | None = 50,
+    fully_closed: bool = False,
+    fully_open: bool = False,
+    opening: bool = False,
+    closing: bool = False,
+) -> dict[int, dict[str, Any]]:
+    """Build mock cover variable data for item ID 234."""
+    return {
+        234: {
+            "Level": level,
+            "Fully Closed": fully_closed,
+            "Fully Open": fully_open,
+            "Opening": opening,
+            "Closing": closing,
+        }
+    }
+
+
+@pytest.fixture
+def platforms() -> list[Platform]:
+    """Platforms which should be loaded during the test."""
+    return [Platform.COVER]
+
+
+@pytest.fixture
+def mock_cover_variables() -> dict:
+    """Mock cover variable data for default blind state."""
+    return _make_cover_data()
+
+
+@pytest.fixture
+def mock_cover_update_variables(
+    mock_cover_variables: dict,
+    mock_c4_director: MagicMock,
+) -> None:
+    """Mock the Director API so tests exercise the real Undefined/empty-dict normalization."""
+
+    async def _mock_get_item_variables(item_id: int) -> list[dict[str, Any]]:
+        item_data = mock_cover_variables.get(item_id, {})
+        return [{"varName": name, "value": value} for name, value in item_data.items()]
+
+    mock_c4_director.get_item_variables = AsyncMock(
+        side_effect=_mock_get_item_variables
+    )
+
+
+@pytest.fixture
+def mock_c4_blind() -> Generator[MagicMock]:
+    """Mock C4Blind class."""
+    with patch(
+        "homeassistant.components.control4.cover.C4Blind", autospec=True
+    ) as mock_class:
+        mock_instance = mock_class.return_value
+        mock_instance.open = AsyncMock()
+        mock_instance.close = AsyncMock()
+        mock_instance.stop = AsyncMock()
+        mock_instance.set_level_target = AsyncMock()
+        yield mock_instance
+
+
+@pytest.fixture
+async def init_integration(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> MockConfigEntry:
+    """Set up the Control4 integration for testing."""
+    await setup_integration(hass, mock_config_entry)
+    return mock_config_entry
+
+
+@pytest.mark.usefixtures(
+    "mock_c4_account",
+    "mock_c4_director",
+    "mock_cover_update_variables",
+    "init_integration",
+)
+async def test_cover_entities(
+    hass: HomeAssistant,
+    entity_registry: er.EntityRegistry,
+    snapshot: SnapshotAssertion,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """Test cover entities are set up correctly with proper attributes."""
+    await snapshot_platform(hass, entity_registry, snapshot, mock_config_entry.entry_id)
+
+
+@pytest.mark.parametrize(
+    ("mock_cover_variables", "expected_state", "expected_position"),
+    [
+        pytest.param(
+            _make_cover_data(level=0, fully_closed=True),
+            CoverState.CLOSED,
+            0,
+            id="closed",
+        ),
+        pytest.param(
+            _make_cover_data(level=100, fully_open=True),
+            CoverState.OPEN,
+            100,
+            id="open",
+        ),
+        pytest.param(
+            _make_cover_data(level=42),
+            CoverState.OPEN,
+            42,
+            id="partial",
+        ),
+        pytest.param(
+            _make_cover_data(level=70, opening=True),
+            CoverState.OPENING,
+            70,
+            id="opening",
+        ),
+        pytest.param(
+            _make_cover_data(level=30, closing=True),
+            CoverState.CLOSING,
+            30,
+            id="closing",
+        ),
+    ],
+)
+@pytest.mark.usefixtures(
+    "mock_c4_account",
+    "mock_c4_director",
+    "mock_cover_update_variables",
+    "init_integration",
+)
+async def test_cover_states(
+    hass: HomeAssistant,
+    expected_state: str,
+    expected_position: int,
+) -> None:
+    """Test cover entity reports the correct state across positions."""
+    state = hass.states.get(ENTITY_ID)
+    assert state is not None
+    assert state.state == expected_state
+    assert state.attributes[ATTR_CURRENT_POSITION] == expected_position
+
+
+@pytest.mark.usefixtures(
+    "mock_c4_account",
+    "mock_c4_director",
+    "mock_cover_update_variables",
+    "init_integration",
+)
+async def test_open_cover(
+    hass: HomeAssistant,
+    mock_c4_blind: MagicMock,
+) -> None:
+    """Test opening the cover dispatches to pyControl4."""
+    await hass.services.async_call(
+        COVER_DOMAIN,
+        SERVICE_OPEN_COVER,
+        {ATTR_ENTITY_ID: ENTITY_ID},
+        blocking=True,
+    )
+    mock_c4_blind.open.assert_called_once_with()
+
+
+@pytest.mark.usefixtures(
+    "mock_c4_account",
+    "mock_c4_director",
+    "mock_cover_update_variables",
+    "init_integration",
+)
+async def test_close_cover(
+    hass: HomeAssistant,
+    mock_c4_blind: MagicMock,
+) -> None:
+    """Test closing the cover dispatches to pyControl4."""
+    await hass.services.async_call(
+        COVER_DOMAIN,
+        SERVICE_CLOSE_COVER,
+        {ATTR_ENTITY_ID: ENTITY_ID},
+        blocking=True,
+    )
+    mock_c4_blind.close.assert_called_once_with()
+
+
+@pytest.mark.usefixtures(
+    "mock_c4_account",
+    "mock_c4_director",
+    "mock_cover_update_variables",
+    "init_integration",
+)
+async def test_stop_cover(
+    hass: HomeAssistant,
+    mock_c4_blind: MagicMock,
+) -> None:
+    """Test stopping the cover dispatches to pyControl4."""
+    await hass.services.async_call(
+        COVER_DOMAIN,
+        SERVICE_STOP_COVER,
+        {ATTR_ENTITY_ID: ENTITY_ID},
+        blocking=True,
+    )
+    mock_c4_blind.stop.assert_called_once_with()
+
+
+@pytest.mark.usefixtures(
+    "mock_c4_account",
+    "mock_c4_director",
+    "mock_cover_update_variables",
+    "init_integration",
+)
+async def test_set_cover_position(
+    hass: HomeAssistant,
+    mock_c4_blind: MagicMock,
+) -> None:
+    """Test setting cover position calls set_level_target with the requested value."""
+    await hass.services.async_call(
+        COVER_DOMAIN,
+        SERVICE_SET_COVER_POSITION,
+        {ATTR_ENTITY_ID: ENTITY_ID, ATTR_POSITION: 75},
+        blocking=True,
+    )
+    mock_c4_blind.set_level_target.assert_called_once_with(level=75)
+
+
+@pytest.mark.parametrize(
+    "mock_cover_variables",
+    [
+        pytest.param({}, id="item_id_missing_from_response"),
+        pytest.param({234: {}}, id="item_id_present_with_no_variables"),
+    ],
+)
+@pytest.mark.usefixtures(
+    "mock_c4_account",
+    "mock_c4_director",
+    "mock_cover_update_variables",
+    "init_integration",
+)
+async def test_cover_not_created_when_no_initial_data(
+    hass: HomeAssistant,
+) -> None:
+    """Test cover entity is not created when there is no initial variable data."""
+    state = hass.states.get(ENTITY_ID)
+    assert state is None
+
+
+@pytest.mark.parametrize(
+    ("mock_cover_variables", "expected_position", "expected_state"),
+    [
+        pytest.param(
+            {234: {"Level": 0}},
+            0,
+            CoverState.CLOSED,
+            id="level_only_closed",
+        ),
+        pytest.param(
+            {234: {"Level": 80}},
+            80,
+            CoverState.OPEN,
+            id="level_only_open",
+        ),
+    ],
+)
+@pytest.mark.usefixtures(
+    "mock_c4_account",
+    "mock_c4_director",
+    "mock_cover_update_variables",
+    "init_integration",
+)
+async def test_cover_partial_variables(
+    hass: HomeAssistant,
+    expected_position: int | None,
+    expected_state: str,
+) -> None:
+    """Cover handles missing variables — falls back to position-derived is_closed."""
+    state = hass.states.get(ENTITY_ID)
+    assert state is not None
+    assert state.attributes.get(ATTR_CURRENT_POSITION) == expected_position
+    assert state.state == expected_state
+
+
+@pytest.mark.usefixtures(
+    "mock_c4_account",
+    "mock_c4_director",
+    "mock_cover_update_variables",
+    "init_integration",
+)
+async def test_cover_unavailable_on_websocket_disconnect(
+    hass: HomeAssistant,
+    mock_c4_websocket: MagicMock,
+) -> None:
+    """Cover becomes unavailable when the WebSocket disconnect callback fires."""
+    state = hass.states.get(ENTITY_ID)
+    assert state is not None
+    assert state.state != STATE_UNAVAILABLE
+
+    await mock_c4_websocket.disconnect_callback()
+    await hass.async_block_till_done()
+
+    state = hass.states.get(ENTITY_ID)
+    assert state is not None
+    assert state.state == STATE_UNAVAILABLE
+
+
+@pytest.mark.usefixtures(
+    "mock_c4_account",
+    "mock_c4_director",
+    "mock_cover_update_variables",
+    "init_integration",
+)
+async def test_cover_push_update(
+    hass: HomeAssistant,
+    mock_c4_websocket: MagicMock,
+) -> None:
+    """Cover state updates when a normal OnDataToUI push event arrives."""
+    state = hass.states.get(ENTITY_ID)
+    assert state is not None
+    assert state.attributes[ATTR_CURRENT_POSITION] == 50
+
+    callback = mock_c4_websocket.item_callbacks[234][0]
+    await callback(
+        234,
+        {"evtName": "OnDataToUI", "data": {"Level": 80, "Fully Open": True}},
+    )
+    await hass.async_block_till_done()
+
+    state = hass.states.get(ENTITY_ID)
+    assert state is not None
+    assert state.state == CoverState.OPEN
+    assert state.attributes[ATTR_CURRENT_POSITION] == 80
+
+
+@pytest.mark.usefixtures(
+    "mock_c4_account",
+    "mock_c4_director",
+    "mock_cover_update_variables",
+    "init_integration",
+)
+async def test_cover_push_update_with_string_encoded_booleans(
+    hass: HomeAssistant,
+    mock_c4_websocket: MagicMock,
+) -> None:
+    """A push carrying "Fully Closed"/"Closing"/"Opening" as strings isn't misread as truthy."""
+    callback = mock_c4_websocket.item_callbacks[234][0]
+    await callback(
+        234,
+        {
+            "evtName": "OnDataToUI",
+            "data": {
+                "Fully Closed": "False",
+                "Closing": "false",
+                "Opening": "false",
+            },
+        },
+    )
+    await hass.async_block_till_done()
+
+    state = hass.states.get(ENTITY_ID)
+    assert state is not None
+    # A naive bool(str) would treat every value here as truthy.
+    assert state.state == CoverState.OPEN
+
+
+@pytest.mark.usefixtures(
+    "mock_c4_account",
+    "mock_c4_director",
+    "mock_cover_update_variables",
+    "init_integration",
+)
+async def test_cover_reconnect_resyncs_state(
+    hass: HomeAssistant,
+    mock_c4_websocket: MagicMock,
+    mock_cover_variables: dict,
+) -> None:
+    """Cover re-fetches and resyncs state after a WebSocket reconnect."""
+    await mock_c4_websocket.disconnect_callback()
+    await hass.async_block_till_done()
+
+    state = hass.states.get(ENTITY_ID)
+    assert state is not None
+    assert state.state == STATE_UNAVAILABLE
+
+    mock_cover_variables[234]["Level"] = 10
+    mock_cover_variables[234]["Fully Closed"] = False
+
+    await mock_c4_websocket.connect_callback()
+    await hass.async_block_till_done()
+
+    state = hass.states.get(ENTITY_ID)
+    assert state is not None
+    assert state.state != STATE_UNAVAILABLE
+    assert state.attributes[ATTR_CURRENT_POSITION] == 10
+
+
+@pytest.mark.usefixtures(
+    "mock_c4_account",
+    "mock_c4_director",
+    "mock_cover_update_variables",
+    "init_integration",
+)
+async def test_reconnect_resync_with_no_data_stays_unavailable(
+    hass: HomeAssistant,
+    mock_c4_websocket: MagicMock,
+    mock_cover_variables: dict,
+) -> None:
+    """A resync that returns no data for an item must not mark it available."""
+    await mock_c4_websocket.disconnect_callback()
+    await hass.async_block_till_done()
+
+    state = hass.states.get(ENTITY_ID)
+    assert state is not None
+    assert state.state == STATE_UNAVAILABLE
+
+    mock_cover_variables[234].clear()
+
+    await mock_c4_websocket.connect_callback()
+    await hass.async_block_till_done()
+
+    state = hass.states.get(ENTITY_ID)
+    assert state is not None
+    assert state.state == STATE_UNAVAILABLE
+
+
+@pytest.mark.usefixtures(
+    "mock_c4_account",
+    "mock_c4_director",
+    "mock_cover_update_variables",
+    "init_integration",
+)
+async def test_cover_periodic_resync(
+    hass: HomeAssistant,
+    mock_cover_variables: dict,
+) -> None:
+    """Cover re-fetches and resyncs state on the periodic safety-net poll."""
+    state = hass.states.get(ENTITY_ID)
+    assert state is not None
+    assert state.attributes[ATTR_CURRENT_POSITION] == 50
+
+    mock_cover_variables[234]["Level"] = 10
+    mock_cover_variables[234]["Fully Closed"] = False
+
+    async_fire_time_changed(
+        hass, dt_util.utcnow() + timedelta(seconds=WEBSOCKET_RESYNC_INTERVAL_SEC)
+    )
+    await hass.async_block_till_done()
+
+    state = hass.states.get(ENTITY_ID)
+    assert state is not None
+    assert state.attributes[ATTR_CURRENT_POSITION] == 10
+
+
+@pytest.mark.usefixtures(
+    "mock_c4_account",
+    "mock_c4_director",
+    "mock_cover_update_variables",
+    "init_integration",
+)
+async def test_reconnect_resync_with_nested_token_refresh_does_not_deadlock(
+    hass: HomeAssistant,
+    mock_c4_websocket: MagicMock,
+    mock_c4_director: MagicMock,
+) -> None:
+    """A BadToken during reconnect-resync must not deadlock on resync_lock."""
+    await mock_c4_websocket.disconnect_callback()
+    await hass.async_block_till_done()
+
+    token_valid = False
+
+    async def _get_item_variables(item_id: int) -> list[dict[str, Any]]:
+        if not token_valid:
+            raise BadToken("expired")
+        return [{"varName": "Level", "value": 60}]
+
+    async def _sio_connect_triggers_reconnect_callback(
+        *args: Any, **kwargs: Any
+    ) -> None:
+        # Real sio_connect() always disconnects before reconnecting.
+        nonlocal token_valid
+        token_valid = True
+        await mock_c4_websocket.disconnect_callback()
+        await mock_c4_websocket.connect_callback()
+
+    mock_c4_director.get_item_variables = AsyncMock(side_effect=_get_item_variables)
+    mock_c4_websocket.sio_connect = AsyncMock(
+        side_effect=_sio_connect_triggers_reconnect_callback
+    )
+
+    await asyncio.wait_for(mock_c4_websocket.connect_callback(), timeout=5)
+
+    state = hass.states.get(ENTITY_ID)
+    assert state is not None
+    assert state.state != STATE_UNAVAILABLE
+    assert state.attributes[ATTR_CURRENT_POSITION] == 60

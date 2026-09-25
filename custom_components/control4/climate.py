@@ -1,0 +1,367 @@
+"""Platform for Control4 Climate."""
+
+import logging
+from typing import Any, override
+
+from pyControl4.climate import C4Climate
+
+from homeassistant.components.climate import (
+    ATTR_TARGET_TEMP_HIGH,
+    ATTR_TARGET_TEMP_LOW,
+    ClimateEntity,
+    ClimateEntityFeature,
+    HVACAction,
+    HVACMode,
+)
+from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+
+from . import get_items_of_category
+from .const import CONTROL4_ENTITY_TYPE, Control4ConfigEntry
+from .director_utils import gather_entry_variables
+from .entity import Control4Entity
+
+_LOGGER = logging.getLogger(__name__)
+
+CONTROL4_CATEGORY = "comfort"
+CONTROL4_PROXY = {"control4_thermostat_proxy", "thermostatV2"}
+
+CONTROL4_HVAC_MODE_OFF = "Off"
+CONTROL4_HVAC_MODE_HEAT = "Heat"
+CONTROL4_HVAC_MODE_COOL = "Cool"
+CONTROL4_HVAC_MODE_HEAT_COOL = "Auto"
+
+CONTROL4_HVAC_MODES = {
+    HVACMode.OFF: CONTROL4_HVAC_MODE_OFF,
+    HVACMode.HEAT: CONTROL4_HVAC_MODE_HEAT,
+    HVACMode.COOL: CONTROL4_HVAC_MODE_COOL,
+    HVACMode.HEAT_COOL: CONTROL4_HVAC_MODE_HEAT_COOL,
+}
+
+HVAC_MODES = {
+    CONTROL4_HVAC_MODE_OFF: HVACMode.OFF,
+    CONTROL4_HVAC_MODE_HEAT: HVACMode.HEAT,
+    CONTROL4_HVAC_MODE_COOL: HVACMode.COOL,
+    CONTROL4_HVAC_MODE_HEAT_COOL: HVACMode.HEAT_COOL,
+}
+
+# Attribute name constants
+ATTR_HUMIDITY = "HUMIDITY"
+ATTR_TEMPERATURE_F = "TEMPERATURE_F"
+ATTR_TEMPERATURE_C = "TEMPERATURE_C"
+ATTR_FAN_MODE = "FAN_MODE"
+ATTR_FAN_MODES_LIST = "FAN_MODES_LIST"
+ATTR_HVAC_STATE = "HVAC_STATE"
+ATTR_HVAC_MODE = "HVAC_MODE"
+ATTR_HVAC_MODES_LIST = "HVAC_MODES_LIST"
+ATTR_SETPOINT_HEAT_F = "SETPOINT_HEAT_F"
+ATTR_HEAT_SETPOINT_F = "HEAT_SETPOINT_F"
+ATTR_SETPOINT_HEAT_C = "SETPOINT_HEAT_C"
+ATTR_HEAT_SETPOINT_C = "HEAT_SETPOINT_C"
+ATTR_SETPOINT_COOL_F = "SETPOINT_COOL_F"
+ATTR_COOL_SETPOINT_F = "COOL_SETPOINT_F"
+ATTR_SETPOINT_COOL_C = "SETPOINT_COOL_C"
+ATTR_COOL_SETPOINT_C = "COOL_SETPOINT_C"
+ATTR_SCALE = "SCALE"
+
+
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: Control4ConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
+    """Set up Control4 climate thermostats from a config entry."""
+    entry_data = entry.runtime_data
+
+    items_of_category = await get_items_of_category(hass, entry, CONTROL4_CATEGORY)
+
+    pending = []
+
+    for item in items_of_category:
+        try:
+            if item["type"] == CONTROL4_ENTITY_TYPE and item["proxy"] in CONTROL4_PROXY:
+                item_name = item["name"]
+                item_id = item["id"]
+                item_parent_id = item["parentId"]
+
+                item_manufacturer = None
+                item_device_name = None
+                item_model = None
+
+                for parent_item in items_of_category:
+                    if parent_item["id"] == item_parent_id:
+                        item_manufacturer = parent_item.get("manufacturer")
+                        item_device_name = parent_item.get("name")
+                        item_model = parent_item.get("model")
+            else:
+                continue
+        except KeyError:
+            _LOGGER.exception(
+                "Unknown device properties received from Control4: %s",
+                item,
+            )
+            continue
+
+        pending.append(
+            {
+                "name": item_name,
+                "idx": item_id,
+                "device_name": item_device_name,
+                "device_manufacturer": item_manufacturer,
+                "device_model": item_model,
+                "device_id": item_parent_id,
+            }
+        )
+
+    item_attributes_by_id = await gather_entry_variables(
+        hass, entry, [item["idx"] for item in pending]
+    )
+
+    entity_list = []
+    for item in pending:
+        item_attributes = item_attributes_by_id[item["idx"]]
+        if not item_attributes:
+            _LOGGER.debug("Skipping climate %s: no initial variables", item["name"])
+            continue
+
+        entity_list.append(
+            Control4Climate(
+                entry_data,
+                entry,
+                device_attributes=item_attributes,
+                **item,
+            )
+        )
+
+    async_add_entities(entity_list, True)
+
+
+class Control4Climate(Control4Entity, ClimateEntity):
+    """Control4 climate entity."""
+
+    _attr_translation_key = "thermostat"
+    _ATTRIBUTES_OF_INTEREST = frozenset(
+        {
+            ATTR_HUMIDITY,
+            ATTR_TEMPERATURE_F,
+            ATTR_TEMPERATURE_C,
+            ATTR_FAN_MODE,
+            ATTR_FAN_MODES_LIST,
+            ATTR_HVAC_STATE,
+            ATTR_HVAC_MODE,
+            ATTR_HVAC_MODES_LIST,
+            ATTR_SETPOINT_HEAT_F,
+            ATTR_HEAT_SETPOINT_F,
+            ATTR_SETPOINT_HEAT_C,
+            ATTR_HEAT_SETPOINT_C,
+            ATTR_SETPOINT_COOL_F,
+            ATTR_COOL_SETPOINT_F,
+            ATTR_SETPOINT_COOL_C,
+            ATTR_COOL_SETPOINT_C,
+            ATTR_SCALE,
+        }
+    )
+
+    def create_api_object(self) -> C4Climate:
+        """Create a pyControl4 device object.
+
+        This exists so the director token used is always the
+        latest one, without needing to re-init the entire entity.
+        """
+        return C4Climate(self.entry_data.director, self._idx)
+
+    @property
+    @override
+    def current_humidity(self) -> float | None:
+        """Return the current humidity."""
+        humidity = self._extra_state_attributes.get(ATTR_HUMIDITY)
+        try:
+            return float(humidity) if humidity is not None else None
+        except ValueError, TypeError:
+            return None
+
+    @property
+    @override
+    def current_temperature(self) -> float | None:
+        """Return the current temperature."""
+        if self.temperature_unit == UnitOfTemperature.FAHRENHEIT:
+            return self._extra_state_attributes.get(ATTR_TEMPERATURE_F)
+        return self._extra_state_attributes.get(ATTR_TEMPERATURE_C)
+
+    @property
+    @override
+    def fan_mode(self) -> str | None:
+        """Returns the current fan mode."""
+        fan_mode = self._extra_state_attributes.get(ATTR_FAN_MODE)
+        if fan_mode is None:
+            return None
+        return fan_mode.lower()
+
+    @property
+    @override
+    def fan_modes(self) -> list[str] | None:
+        """Returns current fan modes supported."""
+        fan_modes = self._extra_state_attributes.get(ATTR_FAN_MODES_LIST)
+        if not fan_modes:
+            return None
+        return [m.strip().lower() for m in fan_modes.split(",") if m.strip()]
+
+    @property
+    @override
+    def hvac_action(self) -> HVACAction | None:
+        """Returns current HVAC action."""
+        hvac_state = (self._extra_state_attributes.get(ATTR_HVAC_STATE) or "").lower()
+        if "cool" in hvac_state:
+            return HVACAction.COOLING
+        if "heat" in hvac_state:
+            return HVACAction.HEATING
+        if "dry" in hvac_state:
+            return HVACAction.DRYING
+        if "fan" in hvac_state:
+            return HVACAction.FAN
+        if "idle" in hvac_state:
+            return HVACAction.IDLE
+        if "off" in hvac_state:
+            return HVACAction.OFF
+        return None
+
+    @property
+    @override
+    def hvac_mode(self) -> HVACMode | None:
+        """Return current HVAC Mode."""
+        hvac_mode = self._extra_state_attributes.get(ATTR_HVAC_MODE, "")
+        if hvac_mode == "" or hvac_mode not in HVAC_MODES:
+            return HVACMode.OFF
+        return HVAC_MODES[hvac_mode]
+
+    @property
+    @override
+    def hvac_modes(self) -> list[HVACMode]:
+        """Returns HVAC modes."""
+        active_modes = []
+        c4modes_str = self._extra_state_attributes.get(ATTR_HVAC_MODES_LIST, "")
+        c4modes = c4modes_str.split(",") if c4modes_str else []
+        for mode in c4modes:
+            if mode in HVAC_MODES and HVAC_MODES[mode] not in active_modes:
+                active_modes.append(HVAC_MODES[mode])
+        if len(active_modes) == 0:
+            active_modes.append(HVACMode.OFF)
+        return active_modes
+
+    def _get_heat_setpoint(self) -> float | None:
+        if self.temperature_unit == UnitOfTemperature.FAHRENHEIT:
+            if ATTR_SETPOINT_HEAT_F in self._extra_state_attributes:
+                return self._extra_state_attributes.get(ATTR_SETPOINT_HEAT_F)
+            if ATTR_HEAT_SETPOINT_F in self._extra_state_attributes:
+                return self._extra_state_attributes.get(ATTR_HEAT_SETPOINT_F)
+        else:
+            if ATTR_SETPOINT_HEAT_C in self._extra_state_attributes:
+                return self._extra_state_attributes.get(ATTR_SETPOINT_HEAT_C)
+            if ATTR_HEAT_SETPOINT_C in self._extra_state_attributes:
+                return self._extra_state_attributes.get(ATTR_HEAT_SETPOINT_C)
+        return None
+
+    def _get_cool_setpoint(self) -> float | None:
+        if self.temperature_unit == UnitOfTemperature.FAHRENHEIT:
+            if ATTR_SETPOINT_COOL_F in self._extra_state_attributes:
+                return self._extra_state_attributes.get(ATTR_SETPOINT_COOL_F)
+            if ATTR_COOL_SETPOINT_F in self._extra_state_attributes:
+                return self._extra_state_attributes.get(ATTR_COOL_SETPOINT_F)
+        else:
+            if ATTR_SETPOINT_COOL_C in self._extra_state_attributes:
+                return self._extra_state_attributes.get(ATTR_SETPOINT_COOL_C)
+            if ATTR_COOL_SETPOINT_C in self._extra_state_attributes:
+                return self._extra_state_attributes.get(ATTR_COOL_SETPOINT_C)
+        return None
+
+    @property
+    @override
+    def target_temperature(self) -> float | None:
+        """Return the temperature currently set to be reached."""
+        if self.hvac_mode == HVACMode.HEAT:
+            return self._get_heat_setpoint()
+        if self.hvac_mode == HVACMode.COOL:
+            return self._get_cool_setpoint()
+        return None
+
+    @property
+    @override
+    def target_temperature_high(self) -> float | None:
+        """Return the upper bound target temperature."""
+        if self.hvac_mode != HVACMode.HEAT_COOL:
+            return None
+        return self._get_cool_setpoint()
+
+    @property
+    @override
+    def target_temperature_low(self) -> float | None:
+        """Return the lower bound target temperature."""
+        if self.hvac_mode != HVACMode.HEAT_COOL:
+            return None
+        return self._get_heat_setpoint()
+
+    @property
+    @override
+    def temperature_unit(self) -> str:
+        """Return the unit of measurement used by the platform."""
+        scale = self._extra_state_attributes.get(ATTR_SCALE) or ""
+        if "f" in scale.lower():
+            return UnitOfTemperature.FAHRENHEIT
+        return UnitOfTemperature.CELSIUS
+
+    @property
+    @override
+    def supported_features(self) -> ClimateEntityFeature:
+        """Flag supported features."""
+        features = (
+            ClimateEntityFeature.TARGET_TEMPERATURE
+            | ClimateEntityFeature.TARGET_TEMPERATURE_RANGE
+            | ClimateEntityFeature.TURN_ON
+            | ClimateEntityFeature.TURN_OFF
+        )
+        if self._extra_state_attributes.get(ATTR_FAN_MODES_LIST):
+            features |= ClimateEntityFeature.FAN_MODE
+        return features
+
+    @override
+    async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
+        """Set the hvac mode."""
+        c4_climate = self.create_api_object()
+        await c4_climate.set_hvac_mode(CONTROL4_HVAC_MODES[hvac_mode])
+
+    @override
+    async def async_set_fan_mode(self, fan_mode: str) -> None:
+        """Set new target fan mode."""
+        c4_climate = self.create_api_object()
+        await c4_climate.set_fan_mode(fan_mode.title())
+
+    async def _set_cool_setpoint(self, temp: float) -> None:
+        c4_climate = self.create_api_object()
+        if self.temperature_unit == UnitOfTemperature.FAHRENHEIT:
+            await c4_climate.set_cool_setpoint_f(temp)
+        else:
+            await c4_climate.set_cool_setpoint_c(temp)
+
+    async def _set_heat_setpoint(self, temp: float) -> None:
+        c4_climate = self.create_api_object()
+        if self.temperature_unit == UnitOfTemperature.FAHRENHEIT:
+            await c4_climate.set_heat_setpoint_f(temp)
+        else:
+            await c4_climate.set_heat_setpoint_c(temp)
+
+    @override
+    async def async_set_temperature(self, **kwargs: Any) -> None:
+        """Set new target temperature."""
+        low_temp = kwargs.get(ATTR_TARGET_TEMP_LOW)
+        high_temp = kwargs.get(ATTR_TARGET_TEMP_HIGH)
+        temp = kwargs.get(ATTR_TEMPERATURE)
+        if self.hvac_mode == HVACMode.HEAT_COOL:
+            if low_temp is not None:
+                await self._set_heat_setpoint(low_temp)
+            if high_temp is not None:
+                await self._set_cool_setpoint(high_temp)
+        elif self.hvac_mode == HVACMode.COOL and temp is not None:
+            await self._set_cool_setpoint(temp)
+        elif self.hvac_mode == HVACMode.HEAT and temp is not None:
+            await self._set_heat_setpoint(temp)
