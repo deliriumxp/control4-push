@@ -109,6 +109,31 @@ def mock_c4_director() -> Generator[MagicMock]:
             return_value=load_json_object_fixture("ui_configuration.json", DOMAIN)
         )
         mock_director.get_item_variables = AsyncMock(return_value=[])
+
+        async def _get_all_item_variable_value(names) -> list[dict[str, Any]]:
+            """The bulk call the integration makes, answered from the per-item mock.
+
+            Tests keep describing items one by one through get_item_variables; this
+            answers like the real endpoint: only the requested names, only items that
+            have them, "Undefined" as None, ValueError on an empty result.
+            """
+            wanted = set(names.split(",")) if isinstance(names, str) else set(names)
+            item_ids = {item["id"] for item in all_items} | {
+                item["parentId"] for item in all_items if item.get("parentId")
+            }
+            rows = []
+            for item_id in sorted(item_ids):
+                for row in await mock_director.get_item_variables(item_id):
+                    if row["varName"] in wanted:
+                        value = None if row["value"] == "Undefined" else row["value"]
+                        rows.append({"id": item_id, "varName": row["varName"], "value": value})
+            if not rows:
+                raise ValueError("Empty response received from Director!")
+            return rows
+
+        mock_director.get_all_item_variable_value = AsyncMock(
+            side_effect=_get_all_item_variable_value
+        )
         yield mock_director
 
 

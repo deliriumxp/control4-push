@@ -1,6 +1,5 @@
 """The Control4 integration."""
 
-import asyncio
 from datetime import datetime, timedelta
 import functools
 import logging
@@ -28,14 +27,13 @@ from homeassistant.helpers.event import async_call_later, async_track_time_inter
 from .const import (
     CONF_CONTROLLER_UNIQUE_ID,
     DOMAIN,
-    RESYNC_CONCURRENCY,
     RETRY_BACKOFF_MAX_SEC,
     SCHEDULE_REFRESH_ADVANCE_SEC,
     WEBSOCKET_RESYNC_INTERVAL_SEC,
     Control4ConfigEntry,
     Control4RuntimeData,
 )
-from .director_utils import director_get_entry_variables
+from .director_utils import update_variables_for_config_entry
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -239,28 +237,32 @@ async def refresh_tokens(hass: HomeAssistant, entry: Control4ConfigEntry) -> Non
 
 
 async def _resync_items(hass: HomeAssistant, entry: Control4ConfigEntry) -> None:
-    """Re-fetch and push current variable state for every WebSocket-subscribed item."""
-    item_callbacks = entry.runtime_data.websocket.item_callbacks
-    # A few requests at a time: one-by-one a large house (items plus their parent
-    # devices, ~300 GETs) outlasts the resync interval; all at once floods the Director.
-    semaphore = asyncio.Semaphore(RESYNC_CONCURRENCY)
+    """Re-fetch and push current variable state for every WebSocket-subscribed item.
 
-    async def resync(item_id: int, callbacks: list) -> None:
-        async with semaphore:
-            try:
-                item_attributes = await director_get_entry_variables(
-                    hass, entry, item_id
-                )
-            except Exception as err:  # noqa: BLE001 - one item (or a failed token refresh) must not end the pass
-                _LOGGER.warning("Failed to resync item %s: %s", item_id, err)
-                return
+    One bulk request for the variables the platforms use (see
+    fetch_initial_variables), not a request per item.
+    """
+    runtime_data = entry.runtime_data
+    item_callbacks = runtime_data.websocket.item_callbacks
+    if not item_callbacks or not runtime_data.resync_variable_names:
+        return
+    try:
+        variables_by_id = await update_variables_for_config_entry(
+            hass, entry, set(runtime_data.resync_variable_names)
+        )
+    except Exception as err:  # noqa: BLE001 - incl. a failed token refresh; next pass retries
+        _LOGGER.warning("Failed to resync Control4 items: %r", err)
+        return
+
+    for item_id, callbacks in list(item_callbacks.items()):
+        item_attributes = variables_by_id.get(item_id)
         if not item_attributes:
             # No data means removed/offline; don't mark it available with stale attributes.
-            # Debug, not warning: parent devices without variables hit this every pass.
+            # Debug, not warning: parent devices without these variables hit this every pass.
             _LOGGER.debug(
                 "Resync for item %s returned no data, leaving unavailable", item_id
             )
-            return
+            continue
         message = {
             "evtName": "OnDataToUI",
             "iddevice": item_id,
@@ -271,10 +273,6 @@ async def _resync_items(hass: HomeAssistant, entry: Control4ConfigEntry) -> None
                 await callback(item_id, message)
             except Exception:
                 _LOGGER.exception("Error applying resync data for item %s", item_id)
-
-    await asyncio.gather(
-        *(resync(item_id, callbacks) for item_id, callbacks in list(item_callbacks.items()))
-    )
 
 
 async def _periodic_resync(

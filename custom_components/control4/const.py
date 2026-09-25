@@ -30,6 +30,8 @@ class Control4RuntimeData:
     cancel_periodic_resync_callback: CALLBACK_TYPE | None = None
     token_refresh_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     resync_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # Variable names the platforms read; the periodic resync re-reads them in one request.
+    resync_variable_names: set[str] = field(default_factory=set)
 
 
 type Control4ConfigEntry = ConfigEntry[Control4RuntimeData]
@@ -43,4 +45,3 @@ SCHEDULE_REFRESH_ADVANCE_SEC = 300
 
 DEFAULT_SCAN_INTERVAL = 5
 WEBSOCKET_RESYNC_INTERVAL_SEC = 60
-RESYNC_CONCURRENCY = 4

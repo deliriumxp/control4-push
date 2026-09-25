@@ -1,14 +1,15 @@
 """Provides data updates from the Control4 controller for platforms."""
 
-import asyncio
 from collections import defaultdict
 from collections.abc import Callable, Coroutine
 import logging
 from typing import Any
 
+from aiohttp import ClientError
 from pyControl4.error_handling import BadToken
 
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import PlatformNotReady
 
 from .const import Control4ConfigEntry
 
@@ -57,52 +58,15 @@ async def _with_token_refresh[T](
     return await call()
 
 
-async def _get_entry_variables(entry: Control4ConfigEntry, item_id: int) -> dict:
-    director = entry.runtime_data.director
-    data = await director.get_item_variables(item_id)
-
-    result = {}
-    for item in data:
-        value = item["value"]
-        result[item["varName"]] = None if value == "Undefined" else value
-
-    return result
-
-
-async def director_get_entry_variables(
-    hass: HomeAssistant, entry: Control4ConfigEntry, item_id: int
-) -> dict:
-    """Retrieve variable data for Control4 entity."""
-    return await _with_token_refresh(
-        hass, entry, lambda: _get_entry_variables(entry, item_id)
-    )
-
-
-async def gather_entry_variables(
-    hass: HomeAssistant, entry: Control4ConfigEntry, item_ids: list[int]
-) -> dict[int, dict]:
-    """Retrieve variable data for multiple Control4 entities concurrently."""
-    results = await asyncio.gather(
-        *(director_get_entry_variables(hass, entry, item_id) for item_id in item_ids),
-        return_exceptions=True,
-    )
-    variables_by_id: dict[int, dict] = {}
-    for item_id, result in zip(item_ids, results, strict=True):
-        if isinstance(result, BaseException):
-            _LOGGER.warning(
-                "Failed to fetch initial variables for item %s: %s", item_id, result
-            )
-            variables_by_id[item_id] = {}
-        else:
-            variables_by_id[item_id] = result
-    return variables_by_id
-
-
 async def _update_variables_for_config_entry(
     entry: Control4ConfigEntry, variable_names: set[str]
 ) -> dict[int, dict[str, Any]]:
     director = entry.runtime_data.director
-    data = await director.get_all_item_variable_value(variable_names)
+    try:
+        data = await director.get_all_item_variable_value(variable_names)
+    except ValueError:
+        # pyControl4 raises on "[]": no item has any of these variables.
+        return {}
     result_dict: defaultdict[int, dict[str, Any]] = defaultdict(dict)
     for item in data:
         result_dict[item["id"]][item["varName"]] = item["value"]
@@ -116,3 +80,32 @@ async def update_variables_for_config_entry(
     return await _with_token_refresh(
         hass, entry, lambda: _update_variables_for_config_entry(entry, variable_names)
     )
+
+
+async def fetch_initial_variables(
+    hass: HomeAssistant,
+    entry: Control4ConfigEntry,
+    variable_names: frozenset[str],
+    item_ids: list[int],
+) -> dict[int, dict[str, Any]]:
+    """Variables of a platform's items, in ONE request to the Director.
+
+    One bulk `/api/v1/items/variables?varnames=` call per platform, not a request
+    per item: per-item fetching opened a TLS connection per item at startup and a
+    freshly restarted Director timed every one of them out (seen on hardware:
+    ~80 lights, all gone until the next restart). If the Director doesn't answer,
+    the platform is not ready and HA retries its setup with backoff.
+
+    The names are also registered for the periodic resync, which re-reads them
+    for every subscribed item in one request as well.
+    """
+    entry.runtime_data.resync_variable_names.update(variable_names)
+    try:
+        variables_by_id = await update_variables_for_config_entry(
+            hass, entry, set(variable_names)
+        )
+    except (TimeoutError, ClientError) as err:
+        raise PlatformNotReady(
+            f"Control4 Director did not return item variables: {err!r}"
+        ) from err
+    return {item_id: variables_by_id.get(item_id, {}) for item_id in item_ids}

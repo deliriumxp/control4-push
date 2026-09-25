@@ -19,7 +19,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import get_items_of_category
 from .const import CONTROL4_ENTITY_TYPE, Control4ConfigEntry
-from .director_utils import gather_entry_variables
+from .director_utils import fetch_initial_variables
 from .entity import Control4Entity
 
 _LOGGER = logging.getLogger(__name__)
@@ -114,8 +114,8 @@ async def async_setup_entry(
             }
         )
 
-    item_attributes_by_id = await gather_entry_variables(
-        hass, entry, [item["idx"] for item in pending]
+    item_attributes_by_id = await fetch_initial_variables(
+        hass, entry, Control4Climate._ATTRIBUTES_OF_INTEREST, [item["idx"] for item in pending]
     )
 
     entity_list = []

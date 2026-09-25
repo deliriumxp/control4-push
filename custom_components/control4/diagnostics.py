@@ -5,7 +5,6 @@ questions that only a live Director can: e.g. which variables a relay (switch) l
 exposes over REST - the dimmer/switch decision in light.py hinges on them.
 """
 
-import asyncio
 from typing import Any
 
 from homeassistant.components.diagnostics import async_redact_data
@@ -35,7 +34,9 @@ async def async_get_config_entry_diagnostics(
         except Exception as err:  # noqa: BLE001 - diagnostics must not fail on one item
             return f"error: {type(err).__name__}: {err}"
 
-    results = await asyncio.gather(*(variables(item["id"]) for item in items))
+    # One after another over one kept-alive connection: diagnostics wants every
+    # variable of every item (no bulk call gives that), without a TLS connection each.
+    results = [await variables(item["id"]) for item in items]
     return {
         "entry": {
             "data": async_redact_data(dict(entry.data), TO_REDACT),

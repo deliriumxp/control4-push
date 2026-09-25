@@ -4,14 +4,16 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from pyControl4.error_handling import BadToken
+from aiohttp import ClientError
 import pytest
 
 from custom_components.control4 import RefreshTokensObject, _periodic_resync
 from custom_components.control4.director_utils import (
-    director_get_entry_variables,
-    gather_entry_variables,
+    fetch_initial_variables,
     to_bool,
+    update_variables_for_config_entry,
 )
+from homeassistant.exceptions import PlatformNotReady
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
@@ -65,7 +67,7 @@ async def test_concurrent_bad_token_only_refreshes_once(
     mock_config_entry: MockConfigEntry,
     mock_c4_director: MagicMock,
 ) -> None:
-    """Concurrent BadToken hits on different items serialize and refresh once."""
+    """Concurrent BadToken hits (two bulk requests) serialize and refresh once."""
     await setup_integration(hass, mock_config_entry)
 
     token_valid = False
@@ -73,10 +75,10 @@ async def test_concurrent_bad_token_only_refreshes_once(
     # Forces both initial calls to hit BadToken together, not one-then-other.
     both_calls_started = asyncio.Barrier(2)
 
-    async def _get_item_variables(item_id: int) -> list[dict]:
+    async def _get_all_item_variable_value(names) -> list[dict]:
         nonlocal sync_count
         if token_valid:
-            return []
+            return [{"id": 1, "varName": "LIGHT_LEVEL", "value": 1}]
         if sync_count < 2:
             sync_count += 1
             await both_calls_started.wait()
@@ -86,7 +88,9 @@ async def test_concurrent_bad_token_only_refreshes_once(
         nonlocal token_valid
         token_valid = True
 
-    mock_c4_director.get_item_variables = AsyncMock(side_effect=_get_item_variables)
+    mock_c4_director.get_all_item_variable_value = AsyncMock(
+        side_effect=_get_all_item_variable_value
+    )
 
     with patch(
         "custom_components.control4.refresh_tokens",
@@ -94,8 +98,8 @@ async def test_concurrent_bad_token_only_refreshes_once(
     ) as mock_refresh:
         await asyncio.wait_for(
             asyncio.gather(
-                director_get_entry_variables(hass, mock_config_entry, 100),
-                director_get_entry_variables(hass, mock_config_entry, 200),
+                update_variables_for_config_entry(hass, mock_config_entry, {"LIGHT_LEVEL"}),
+                update_variables_for_config_entry(hass, mock_config_entry, {"LIGHT_STATE"}),
             ),
             timeout=5,
         )
@@ -142,26 +146,65 @@ async def test_scheduled_refresh_skips_when_lock_already_held(
 
 
 @pytest.mark.usefixtures("mock_c4_account")
-async def test_gather_entry_variables_isolates_per_item_failures(
+async def test_начальная_загрузка_одним_запросом(
     hass: HomeAssistant,
     mock_config_entry: MockConfigEntry,
     mock_c4_director: MagicMock,
 ) -> None:
-    """One item's fetch failure doesn't prevent the others from loading."""
+    """Переменные всех элементов платформы — один массовый запрос, не запрос на элемент."""
     await setup_integration(hass, mock_config_entry)
+    mock_c4_director.get_item_variables.reset_mock()
+    mock_c4_director.get_all_item_variable_value = AsyncMock(
+        return_value=[
+            {"id": 200, "varName": "LIGHT_LEVEL", "value": 50},
+            {"id": 300, "varName": "LIGHT_STATE", "value": 1},
+            {"id": 999, "varName": "LIGHT_LEVEL", "value": 7},
+        ]
+    )
 
-    async def _get_item_variables(item_id: int) -> list[dict]:
-        if item_id == 100:
-            raise TimeoutError("device unreachable")
-        return [{"varName": "Level", "value": 50}]
+    result = await fetch_initial_variables(
+        hass, mock_config_entry, frozenset({"LIGHT_LEVEL", "LIGHT_STATE"}), [100, 200, 300]
+    )
 
-    mock_c4_director.get_item_variables = AsyncMock(side_effect=_get_item_variables)
+    assert result == {100: {}, 200: {"LIGHT_LEVEL": 50}, 300: {"LIGHT_STATE": 1}}
+    mock_c4_director.get_all_item_variable_value.assert_awaited_once()
+    mock_c4_director.get_item_variables.assert_not_awaited()
+    assert {"LIGHT_LEVEL", "LIGHT_STATE"} <= mock_config_entry.runtime_data.resync_variable_names
 
-    result = await gather_entry_variables(hass, mock_config_entry, [100, 200, 300])
 
-    assert result[100] == {}
-    assert result[200] == {"Level": 50}
-    assert result[300] == {"Level": 50}
+@pytest.mark.usefixtures("mock_c4_account")
+@pytest.mark.parametrize("error", [TimeoutError(), ClientError("reset")])
+async def test_директор_не_ответил_при_старте_платформа_не_готова(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_c4_director: MagicMock,
+    error: Exception,
+) -> None:
+    """С объекта: директор после перезапуска не ответил за 10 с — HA повторит, а не потеряет свет."""
+    await setup_integration(hass, mock_config_entry)
+    mock_c4_director.get_all_item_variable_value = AsyncMock(side_effect=error)
+
+    with pytest.raises(PlatformNotReady):
+        await fetch_initial_variables(
+            hass, mock_config_entry, frozenset({"LIGHT_LEVEL"}), [100]
+        )
+
+
+@pytest.mark.usefixtures("mock_c4_account")
+async def test_ни_у_кого_нет_переменных_пустой_результат(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_c4_director: MagicMock,
+) -> None:
+    """pyControl4 бросает ValueError на «[]» — это «нет таких элементов», а не сбой."""
+    await setup_integration(hass, mock_config_entry)
+    mock_c4_director.get_all_item_variable_value = AsyncMock(side_effect=ValueError("[]"))
+
+    result = await fetch_initial_variables(
+        hass, mock_config_entry, frozenset({"Level"}), [100]
+    )
+
+    assert result == {100: {}}
 
 
 @pytest.mark.parametrize(

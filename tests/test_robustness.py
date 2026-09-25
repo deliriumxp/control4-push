@@ -25,7 +25,7 @@ def platforms() -> list[Platform]:
 
 
 async def test_сверка_не_обрывается_на_сбойном_элементе(hass: HomeAssistant) -> None:
-    """Сбой загрузки (в т.ч. неудачная смена токена) и сбой записи состояния — только у своего элемента."""
+    """Сбой записи состояния одного элемента не останавливает остальные; без данных — пропуск."""
     received: list[int] = []
 
     async def ok(item_id, message):
@@ -36,16 +36,27 @@ async def test_сверка_не_обрывается_на_сбойном_эле
 
     entry = MagicMock()
     entry.runtime_data.websocket.item_callbacks = {1: [ok], 2: [broken, ok], 3: [ok]}
+    entry.runtime_data.resync_variable_names = {"LIGHT_LEVEL"}
+    bulk = AsyncMock(return_value={2: {"LIGHT_LEVEL": 50}, 3: {"LIGHT_LEVEL": 0}})
 
-    async def variables(hass, entry, item_id):
-        if item_id == 1:
-            raise ConfigEntryNotReady("token refresh failed")
-        return {"LIGHT_LEVEL": 50}
-
-    with patch("custom_components.control4.director_get_entry_variables", new=variables):
+    with patch("custom_components.control4.update_variables_for_config_entry", new=bulk):
         await _resync_items(hass, entry)
 
     assert sorted(received) == [2, 3]
+    bulk.assert_awaited_once()
+
+
+async def test_сверка_переживает_сбой_запроса(hass: HomeAssistant, caplog) -> None:
+    """Запрос сверки упал (в т.ч. неудачная смена токена) — предупреждение, следующий проход повторит."""
+    entry = MagicMock()
+    entry.runtime_data.websocket.item_callbacks = {1: [AsyncMock()]}
+    entry.runtime_data.resync_variable_names = {"LIGHT_LEVEL"}
+    failing = AsyncMock(side_effect=ConfigEntryNotReady("token refresh failed"))
+
+    with patch("custom_components.control4.update_variables_for_config_entry", new=failing):
+        await _resync_items(hass, entry)
+
+    assert "Failed to resync Control4 items" in caplog.text
 
 
 @pytest.mark.usefixtures("mock_c4_account", "mock_c4_director")

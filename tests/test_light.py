@@ -431,3 +431,26 @@ async def test_light_periodic_resync(
     state = hass.states.get(DIMMER_ENTITY_ID)
     assert state is not None
     assert state.state == "off"
+
+
+@pytest.mark.usefixtures("mock_c4_account", "mock_light_update_variables")
+async def test_директор_молчал_при_старте_свет_появляется_при_повторе(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_c4_director: MagicMock,
+    freezer: FrozenDateTimeFactory,
+) -> None:
+    """С объекта: после перезапуска директор не ответил — раньше свет пропадал до рестарта HA."""
+    answer = mock_c4_director.get_all_item_variable_value.side_effect
+    mock_c4_director.get_all_item_variable_value.side_effect = TimeoutError
+
+    await setup_integration(hass, mock_config_entry)
+    assert hass.states.get(DIMMER_ENTITY_ID) is None
+
+    mock_c4_director.get_all_item_variable_value.side_effect = answer
+    freezer.tick(timedelta(seconds=60))  # PlatformNotReady: HA retries with backoff from 30 s
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert hass.states.get(DIMMER_ENTITY_ID).state == "on"
+    assert hass.states.get(SWITCH_ENTITY_ID) is not None
