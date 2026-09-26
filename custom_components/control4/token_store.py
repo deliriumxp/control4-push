@@ -11,11 +11,12 @@ The account password is already stored there in plain text, so the token adds no
 """
 
 import asyncio
+from collections.abc import Awaitable, Callable
 import logging
 import time
 from typing import Any
 
-from aiohttp import ClientError
+from aiohttp import ClientError, ServerDisconnectedError
 from pyControl4.account import C4Account
 from pyControl4.error_handling import BadCredentials, C4Exception
 
@@ -72,6 +73,26 @@ def account_for(hass: HomeAssistant, entry: Control4ConfigEntry) -> C4Account:
     )
 
 
+async def _cloud_call[T](call: Callable[[], Awaitable[T]]) -> T:
+    """One time-boxed cloud request, repeated once if the server dropped the connection.
+
+    apis.control4.com leaves the connection open after a response, then often closes it
+    (TLS close_notify) when the next request arrives on it: 2 of 3 reuses, checked with
+    curl on 2026-09-26. curl and browsers resend such a request on a fresh connection;
+    aiohttp does it only for idempotent methods, and the token requests are POSTs - so the
+    director-token request, reusing the account request's connection, failed with
+    ServerDisconnectedError (3 setups in a row on an object). A token request is safe to
+    repeat.
+    """
+    try:
+        async with asyncio.timeout(CLOUD_REQUEST_TIMEOUT_SEC):
+            return await call()
+    except ServerDisconnectedError:
+        _LOGGER.debug("Control4 cloud closed the connection; repeating the request")
+    async with asyncio.timeout(CLOUD_REQUEST_TIMEOUT_SEC):
+        return await call()
+
+
 async def fetch_cloud_token(
     hass: HomeAssistant, entry: Control4ConfigEntry
 ) -> tuple[C4Account, dict[str, Any]]:
@@ -82,12 +103,12 @@ async def fetch_cloud_token(
     """
     account = account_for(hass, entry)
     try:
-        async with asyncio.timeout(CLOUD_REQUEST_TIMEOUT_SEC):
-            await account.get_account_bearer_token()
-        async with asyncio.timeout(CLOUD_REQUEST_TIMEOUT_SEC):
-            token_dict = await account.get_director_bearer_token(
+        await _cloud_call(account.get_account_bearer_token)
+        token_dict = await _cloud_call(
+            lambda: account.get_director_bearer_token(
                 entry.data[CONF_CONTROLLER_UNIQUE_ID]
             )
+        )
     except BadCredentials as err:
         raise ConfigEntryAuthFailed(err) from err
     except (TimeoutError, ClientError, C4Exception, KeyError) as err:
@@ -125,7 +146,7 @@ async def director_version(
             try:
                 async with asyncio.timeout(CLOUD_REQUEST_TIMEOUT_SEC):
                     if not getattr(account, "account_bearer_token", None):
-                        await account.get_account_bearer_token()
+                        await _cloud_call(account.get_account_bearer_token)
                     href = (await account.get_account_controllers())["href"]
                     version = await account.get_controller_os_version(href)
             except (TimeoutError, ClientError, C4Exception, KeyError) as err:

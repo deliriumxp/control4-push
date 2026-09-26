@@ -4,6 +4,7 @@ import asyncio
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from aiohttp import ServerDisconnectedError
 from freezegun.api import FrozenDateTimeFactory
 from pyControl4.error_handling import BadToken
 import pytest
@@ -125,6 +126,34 @@ async def test_зависшее_облако_не_держит_запуск_ми
         await setup_integration(hass, mock_config_entry)
 
     assert mock_config_entry.state is ConfigEntryState.SETUP_RETRY
+
+
+@pytest.mark.usefixtures("mock_c4_director")
+async def test_облако_закрыло_соединение_запрос_повторяется_сразу(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_c4_account: MagicMock
+) -> None:
+    """С объекта: запрос токена директора 3 раза подряд падал с Server disconnected."""
+    mock_c4_account.get_director_bearer_token.side_effect = [
+        ServerDisconnectedError(),
+        {"token": "test", "validSeconds": 86400},
+    ]
+
+    await setup_integration(hass, mock_config_entry)
+
+    assert mock_config_entry.state is ConfigEntryState.LOADED
+    assert mock_c4_account.get_director_bearer_token.await_count == 2
+
+
+@pytest.mark.usefixtures("mock_c4_director")
+async def test_облако_рвёт_соединение_дважды_это_повтор_настройки(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_c4_account: MagicMock
+) -> None:
+    mock_c4_account.get_director_bearer_token.side_effect = ServerDisconnectedError()
+
+    await setup_integration(hass, mock_config_entry)
+
+    assert mock_config_entry.state is ConfigEntryState.SETUP_RETRY
+    assert mock_c4_account.get_director_bearer_token.await_count == 2
 
 
 async def test_версия_директора_из_брокера_без_облака(
