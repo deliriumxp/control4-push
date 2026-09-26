@@ -15,6 +15,7 @@ from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_USERNAME
 from homeassistant.helpers import aiohttp_client
 from homeassistant.helpers.device_registry import format_mac
 
+from . import token_store
 from .const import CONF_CONTROLLER_UNIQUE_ID, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
@@ -46,8 +47,7 @@ class Control4ConfigFlow(ConfigFlow, domain=DOMAIN):
         password = user_input[CONF_PASSWORD]
 
         # Step 1: Authenticate with Control4 cloud API
-        account_session = aiohttp_client.async_get_clientsession(self.hass)
-        account = C4Account(username, password, account_session)
+        account = C4Account(username, password, token_store.cloud_session(self.hass))
         try:
             await account.get_account_bearer_token()
 

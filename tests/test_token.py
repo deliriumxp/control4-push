@@ -9,7 +9,7 @@ from freezegun.api import FrozenDateTimeFactory
 from pyControl4.error_handling import BadToken
 import pytest
 
-from custom_components.control4 import RefreshTokensObject
+from custom_components.control4 import RefreshTokensObject, token_store
 from custom_components.control4.const import (
     CONF_DIRECTOR_SW_VERSION,
     CONF_TOKEN_EXPIRES,
@@ -89,9 +89,29 @@ async def test_почти_истёкший_токен_обновляется_п�
     entry = _with_saved_token(mock_config_entry, seconds_left=10 * 60)
 
     await setup_integration(hass, entry)
+    mock_c4_account.get_director_bearer_token.assert_not_awaited()
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
 
     mock_c4_account.get_director_bearer_token.assert_awaited_once()
     assert entry.data[CONF_TOKEN] == "test"
+
+
+@pytest.mark.usefixtures("mock_c4_director")
+async def test_почти_истёкший_токен_без_облака_запуск_не_ломает(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_c4_account: MagicMock
+) -> None:
+    """Директор примет старый токен до конца — запуск не ждёт облака, новый добывает цепочка."""
+    entry = _with_saved_token(mock_config_entry, seconds_left=10 * 60)
+    mock_c4_account.get_director_bearer_token.side_effect = TimeoutError
+
+    await setup_integration(hass, entry)
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+
+    assert entry.state is ConfigEntryState.LOADED
+    mock_c4_account.get_director_bearer_token.assert_awaited_once()
+    assert entry.data[CONF_TOKEN] == "saved"
 
 
 async def test_директор_отверг_сохранённый_токен_берём_новый(
@@ -129,31 +149,35 @@ async def test_зависшее_облако_не_держит_запуск_ми
 
 
 @pytest.mark.usefixtures("mock_c4_director")
-async def test_облако_закрыло_соединение_запрос_повторяется_сразу(
+async def test_облако_каждый_запрос_по_новому_соединению(
     hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_c4_account: MagicMock
 ) -> None:
-    """С объекта: запрос токена директора 3 раза подряд падал с Server disconnected."""
-    mock_c4_account.get_director_bearer_token.side_effect = [
-        ServerDisconnectedError(),
-        {"token": "test", "validSeconds": 86400},
-    ]
-
+    """С объекта: облако рвало повторно используемое соединение, запрос токена падал с
+    Server disconnected 3 раза подряд. Соединения с облаком не переиспользуются."""
     await setup_integration(hass, mock_config_entry)
 
-    assert mock_config_entry.state is ConfigEntryState.LOADED
-    assert mock_c4_account.get_director_bearer_token.await_count == 2
+    session = token_store.cloud_session(hass)
+    assert session.connector.force_close
+    assert token_store.C4Account.call_args.args[2] is session
 
 
 @pytest.mark.usefixtures("mock_c4_director")
-async def test_облако_рвёт_соединение_дважды_это_повтор_настройки(
-    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_c4_account: MagicMock
+async def test_сбой_облака_при_запуске_виден_без_отладки(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_c4_account: MagicMock,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    """HA пишет повтор настройки на INFO — с уровнем warning казалось, что попыток нет."""
     mock_c4_account.get_director_bearer_token.side_effect = ServerDisconnectedError()
 
     await setup_integration(hass, mock_config_entry)
 
     assert mock_config_entry.state is ConfigEntryState.SETUP_RETRY
-    assert mock_c4_account.get_director_bearer_token.await_count == 2
+    assert any(
+        r.levelname == "WARNING" and "did not issue a director token" in r.getMessage()
+        for r in caplog.records
+    )
 
 
 async def test_версия_директора_из_брокера_без_облака(

@@ -7,6 +7,7 @@ import random
 from typing import Any
 
 from aiohttp import client_exceptions
+from pyControl4.account import C4Account
 from pyControl4.director import C4Director
 from pyControl4.error_handling import BadToken, C4Exception, InvalidCategory
 
@@ -70,6 +71,21 @@ def _schedule_next_refresh(hass: HomeAssistant, entry: Control4ConfigEntry) -> N
         )
 
 
+async def _setup_cloud_token(
+    hass: HomeAssistant, entry: Control4ConfigEntry
+) -> tuple[C4Account, dict[str, Any]]:
+    """fetch_cloud_token for setup, with a failure in the log at WARNING.
+
+    HA logs a setup retry at INFO only and stretches the pauses up to 10 minutes, so an
+    unreachable Control4 cloud looked like the integration not even trying (2026-09-26).
+    """
+    try:
+        return await token_store.fetch_cloud_token(hass, entry)
+    except ConfigEntryNotReady as err:
+        _LOGGER.warning("%s; Home Assistant will retry the setup", err)
+        raise
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: Control4ConfigEntry) -> bool:
     """Set up Control4 from a config entry.
 
@@ -79,7 +95,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: Control4ConfigEntry) -> 
     """
     token = token_store.stored_token(entry)
     if token is None:
-        account, token_dict = await token_store.fetch_cloud_token(hass, entry)
+        account, token_dict = await _setup_cloud_token(hass, entry)
         token = token_dict[CONF_TOKEN]
     else:
         account = token_store.account_for(hass, entry)
@@ -117,7 +133,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: Control4ConfigEntry) -> 
                     "The Director rejected the saved token; getting a new one from"
                     " the Control4 cloud"
                 )
-                account, token_dict = await token_store.fetch_cloud_token(hass, entry)
+                account, token_dict = await _setup_cloud_token(hass, entry)
                 runtime_data.account = account
                 runtime_data.director = _director(hass, entry, token_dict[CONF_TOKEN])
                 director_all_items = await runtime_data.director.get_all_item_info()

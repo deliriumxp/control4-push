@@ -43,8 +43,8 @@ CONTROL4_ENTITY_TYPE = 7
 # Director token lifecycle (token_store.py). The token lives validSeconds (24 h).
 CONF_TOKEN_EXPIRES = "token_expires"
 CONF_DIRECTOR_SW_VERSION = "director_sw_version"
-# Start with a saved token only if it has at least this much life left.
-MIN_STORED_TOKEN_LIFE_SEC = 3600
+# Start with a saved token unless it expires within this margin (see stored_token).
+MIN_STORED_TOKEN_LIFE_SEC = 60
 # Refresh starts this long before expiry: half the token's life is left for retries,
 # because access to Control4 resources from Russia can be down for hours.
 TOKEN_REFRESH_WINDOW_SEC = 12 * 3600
