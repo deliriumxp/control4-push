@@ -27,6 +27,8 @@ import socketio_v4 as socketio
 
 # How long disconnect() lets a pending reconnect attempt finish before cancelling it.
 _RECONNECT_STOP_TIMEOUT = 10
+# How long rotate_token() waits for the new socket's subscription before keeping the old one.
+_SUBSCRIBE_TIMEOUT = 15
 
 
 class _DirectorEngineIOClient(engineio_v3.AsyncClient):
@@ -115,24 +117,61 @@ class DirectorWebsocket(C4Websocket):
     ) -> None:
         super().__init__(ip, session_no_verify_ssl, connect_callback, disconnect_callback)
 
+    def _new_client(
+        self, token: str
+    ) -> tuple[_DirectorSocketIOClient, _C4DirectorNamespace]:
+        assert self.session is not None
+        client = _DirectorSocketIOClient(connector=self.session.connector)
+        namespace = _C4DirectorNamespace(
+            token=token,
+            url=self.base_url,
+            callback=self._callback,
+            session=self.session,
+            connect_callback=self.connect_callback,
+            disconnect_callback=self.disconnect_callback,
+        )
+        client.register_namespace(namespace)
+        return client, namespace
+
+    async def _connect(self, client: _DirectorSocketIOClient, token: str) -> None:
+        await client.connect(self.wss_url, transports=["websocket"], headers={"JWT": token})
+
     @override
     async def sio_connect(self, director_bearer_token: str) -> None:
         """Same handshake as pyControl4 2.0.2, with the reconnect-safe client."""
         await self.sio_disconnect()
-        assert self.session is not None
-        self._sio = _DirectorSocketIOClient(connector=self.session.connector)
-        self._sio.register_namespace(
-            _C4DirectorNamespace(
-                token=director_bearer_token,
-                url=self.base_url,
-                callback=self._callback,
-                session=self.session,
-                connect_callback=self.connect_callback,
-                disconnect_callback=self.disconnect_callback,
-            )
-        )
-        await self._sio.connect(
-            self.wss_url,
-            transports=["websocket"],
-            headers={"JWT": director_bearer_token},
-        )
+        self._sio, _ = self._new_client(director_bearer_token)
+        await self._connect(self._sio, director_bearer_token)
+
+    async def rotate_token(self, director_bearer_token: str) -> None:
+        """Move the push channel to a new token without a gap: open, then close.
+
+        The Director stops pushing on a socket once the token it was opened with expires
+        (pyControl4's sio_connect docs), so a new token needs a new socket. sio_connect
+        closes the old socket first, and every event in between was lost - on each token
+        refresh. Here the old socket keeps delivering until the new one is subscribed.
+
+        If the new socket fails, the old one stays, and its own reconnect loop switches to
+        the new token - otherwise, after a drop past the old token's expiry, it would retry
+        with a dead token forever.
+        """
+        old = self._sio
+        if not isinstance(old, _DirectorSocketIOClient) or old._closing:
+            await self.sio_connect(director_bearer_token)
+            return
+        new, namespace = self._new_client(director_bearer_token)
+        try:
+            await self._connect(new, director_bearer_token)
+            # Connected is not enough: events flow only once the subscription is set up.
+            async with asyncio.timeout(_SUBSCRIBE_TIMEOUT):
+                while not namespace.connected:
+                    await asyncio.sleep(0.05)
+        except BaseException:
+            await new.disconnect()
+            old.connection_headers = {"JWT": director_bearer_token}
+            if (old_namespace := old.namespace_handlers.get("/")) is not None:
+                old_namespace.token = director_bearer_token
+            raise
+        self._sio = new
+        # A deliberate disconnect fires no disconnect callback: entities stay available.
+        await old.disconnect()

@@ -164,6 +164,7 @@ def mock_c4_websocket() -> Generator[MagicMock]:
     ) as mock_ws_class:
         mock_ws = mock_ws_class.return_value
         mock_ws.sio_connect = AsyncMock()
+        mock_ws.rotate_token = AsyncMock()
         mock_ws.sio_disconnect = AsyncMock()
         mock_ws.add_item_callback = MagicMock(side_effect=_add_item_callback)
         mock_ws.remove_item_callback = MagicMock(side_effect=_remove_item_callback)

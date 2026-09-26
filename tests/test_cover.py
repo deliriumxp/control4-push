@@ -500,18 +500,16 @@ async def test_reconnect_resync_with_nested_token_refresh_does_not_deadlock(
             raise BadToken("expired")
         return [{"varName": "Level", "value": 60}]
 
-    async def _sio_connect_triggers_reconnect_callback(
-        *args: Any, **kwargs: Any
-    ) -> None:
-        # Real sio_connect() always disconnects before reconnecting.
+    async def _rotation_triggers_reconnect_callback(*args: Any, **kwargs: Any) -> None:
+        # Worst case for the lock: the old socket drops while the new one connects.
         nonlocal token_valid
         token_valid = True
         await mock_c4_websocket.disconnect_callback()
         await mock_c4_websocket.connect_callback()
 
     mock_c4_director.get_item_variables = AsyncMock(side_effect=_get_item_variables)
-    mock_c4_websocket.sio_connect = AsyncMock(
-        side_effect=_sio_connect_triggers_reconnect_callback
+    mock_c4_websocket.rotate_token = AsyncMock(
+        side_effect=_rotation_triggers_reconnect_callback
     )
 
     await asyncio.wait_for(mock_c4_websocket.connect_callback(), timeout=5)

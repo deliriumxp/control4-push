@@ -232,11 +232,32 @@ async def test_повтор_после_сбоя_сокета_не_идёт_в_о
     mock_c4_account: MagicMock,
     mock_c4_websocket: MagicMock,
 ) -> None:
-    """Токен уже свежий, упало только подключение сокета — повтор переподключает, облако не трогает."""
+    """Токен уже свежий, упало только подключение сокета — повтор переводит сокет, облако не трогает."""
     await setup_integration(hass, mock_config_entry)
     mock_c4_account.get_director_bearer_token.reset_mock()
 
     await RefreshTokensObject(hass, mock_config_entry).refresh_tokens(dt_util.utcnow())
 
     mock_c4_account.get_director_bearer_token.assert_not_awaited()
-    mock_c4_websocket.sio_connect.assert_awaited_with("test")
+    mock_c4_websocket.rotate_token.assert_awaited_with("test")
+
+
+@pytest.mark.usefixtures("mock_c4_director", "mock_c4_account")
+async def test_обновление_токена_не_рвёт_сокет(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_c4_websocket: MagicMock,
+    freezer: FrozenDateTimeFactory,
+) -> None:
+    """Плановое обновление переводит сокет на новый токен без разрыва, а не пересоздаёт его."""
+    await setup_integration(hass, mock_config_entry)
+    mock_c4_websocket.sio_connect.reset_mock()
+
+    freezer.tick(86400 - TOKEN_REFRESH_WINDOW_SEC + 60)
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    mock_c4_websocket.rotate_token.assert_awaited_once_with("test")
+    mock_c4_websocket.sio_connect.assert_not_awaited()
+    mock_c4_websocket.sio_disconnect.assert_not_awaited()
+    mock_config_entry.runtime_data.cancel_token_refresh_callback()

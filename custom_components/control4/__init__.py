@@ -220,10 +220,10 @@ async def get_items_of_category(
 async def refresh_tokens(
     hass: HomeAssistant, entry: Control4ConfigEntry, *, force: bool = False
 ) -> None:
-    """Get a new director token and reconnect the WebSocket with it.
+    """Get a new director token and move the WebSocket onto it without a gap.
 
     Without `force`, a saved token that is still outside the refresh window is reused -
-    the retry after a failed WebSocket reconnect must not go to the cloud again. `force`
+    the retry after a failed WebSocket rotation must not go to the cloud again. `force`
     is for the Director having rejected the current token (BadToken).
     """
     runtime_data = entry.runtime_data
@@ -236,7 +236,7 @@ async def refresh_tokens(
     runtime_data.director = _director(hass, entry, token)
 
     try:
-        await runtime_data.websocket.sio_connect(token)
+        await runtime_data.websocket.rotate_token(token)
     except Exception as err:
         raise ConfigEntryNotReady(err) from err
 

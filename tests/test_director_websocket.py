@@ -62,6 +62,8 @@ class FakeDirector:
         self.port = 0
         self.available = True
         self.refused = 0
+        self.handshake_tokens: list[str | None] = []
+        self.subscription_tokens: list[str | None] = []
 
     async def socketio(self, request: web.Request) -> web.StreamResponse:
         if not self.available:
@@ -70,6 +72,7 @@ class FakeDirector:
         ws = web.WebSocketResponse()
         await ws.prepare(request)
         self.connections.append(ws)
+        self.handshake_tokens.append(request.headers.get("JWT"))
         number = len(self.connections)
         await ws.send_str(
             '0{"sid":"s%d","upgrades":[],"pingInterval":25000,"pingTimeout":60000}'
@@ -88,6 +91,7 @@ class FakeDirector:
         return ws
 
     async def subscription(self, request: web.Request) -> web.Response:
+        self.subscription_tokens.append(request.query.get("JWT"))
         return web.json_response({"subscriptionId": "sub1"})
 
 
@@ -188,6 +192,63 @@ async def test_disconnect_during_outage_stops_reconnect_loop(
     assert director.refused == refused
     assert len(director.connections) == 1
     assert events == [1]
+
+
+async def test_rotate_token_opens_new_socket_before_closing_old(
+    director: FakeDirector, ha_session
+) -> None:
+    """Смена токена: новый сокет подписан раньше, чем закрыт старый; сущности не гаснут."""
+    drops: list[bool] = []
+
+    async def on_disconnect() -> None:
+        drops.append(True)
+
+    events: list[int] = []
+
+    async def on_event(device_id: int, message: dict) -> None:
+        events.append(message["data"]["level"])
+
+    websocket = DirectorWebsocket(
+        f"127.0.0.1:{director.port}", ha_session, disconnect_callback=on_disconnect
+    )
+    websocket.add_item_callback(5, on_event)
+    await websocket.sio_connect("old")
+    try:
+        await _wait_for(lambda: events == [1])
+
+        await websocket.rotate_token("new")
+
+        assert director.handshake_tokens == ["old", "new"]
+        assert director.subscription_tokens == ["old", "new"]
+        await _wait_for(lambda: events == [1, 2])
+        await _wait_for(lambda: director.connections[0].closed)
+        assert not director.connections[1].closed
+        assert drops == []
+    finally:
+        await websocket.sio_disconnect()
+
+
+async def test_failed_rotation_keeps_old_socket_and_its_reconnects_use_new_token(
+    director: FakeDirector, ha_session
+) -> None:
+    """Новый сокет не открылся: старый живёт, а его переподключение идёт уже с новым токеном."""
+    websocket, events = await _connect(DirectorWebsocket, director, ha_session)
+    try:
+        await _wait_for(lambda: events == [1])
+
+        director.available = False
+        with pytest.raises(Exception):
+            await websocket.rotate_token("new")
+        assert not director.connections[0].closed
+
+        director.available = True
+        await director.connections[0].close()
+        await _wait_for(lambda: events == [1, 2], timeout=10)
+
+        assert director.handshake_tokens == ["token", "new"]
+        assert director.subscription_tokens == ["token", "new"]
+    finally:
+        await websocket.sio_disconnect()
 
 
 async def test_stock_c4websocket_never_reconnects(
