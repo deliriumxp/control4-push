@@ -15,13 +15,18 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import get_items_of_category
-from .const import CONTROL4_ENTITY_TYPE, Control4ConfigEntry
+from .const import (
+    CONF_DRY_CONTACT_COVERS,
+    CONTROL4_COVER_CATEGORY,
+    CONTROL4_ENTITY_TYPE,
+    Control4ConfigEntry,
+)
 from .director_utils import fetch_initial_variables, to_bool
 from .entity import Control4Entity
 
 _LOGGER = logging.getLogger(__name__)
 
-CONTROL4_CATEGORY = "blinds_shades"
+CONTROL4_CATEGORY = CONTROL4_COVER_CATEGORY
 
 CONTROL4_LEVEL = "Level"
 CONTROL4_FULLY_CLOSED = "Fully Closed"
@@ -82,6 +87,7 @@ async def async_setup_entry(
         hass, entry, Control4Cover._ATTRIBUTES_OF_INTEREST, [item["idx"] for item in pending]
     )
 
+    dry_contact_ids = set(entry.options.get(CONF_DRY_CONTACT_COVERS, []))
     entity_list: list[CoverEntity] = []
     for item in pending:
         item_attributes = item_attributes_by_id[item["idx"]]
@@ -94,6 +100,7 @@ async def async_setup_entry(
                 entry_data,
                 entry,
                 device_attributes=item_attributes,
+                is_dry_contact=str(item["idx"]) in dry_contact_ids,
                 **item,
             )
         )
@@ -115,6 +122,17 @@ class Control4Cover(Control4Entity, CoverEntity):
         | CoverEntityFeature.STOP
         | CoverEntityFeature.SET_POSITION
     )
+
+    def __init__(self, *args: Any, is_dry_contact: bool = False, **kwargs: Any) -> None:
+        """Initialize; dry-contact covers keep open/close enabled whatever the status.
+
+        Relay blinds have no position feedback, yet Control4 reports a best guess, and
+        the HA frontend disables open/close once that says "already there". With
+        assumed_state it never does (canOpen/canClose in home-assistant/frontend's
+        data/cover.ts). Status itself is computed the same either way.
+        """
+        super().__init__(*args, **kwargs)
+        self._attr_assumed_state = is_dry_contact
 
     def _create_blind_api_object(self) -> C4Blind:
         """Create a pyControl4 blind object with the current director token."""

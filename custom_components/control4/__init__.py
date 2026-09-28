@@ -26,6 +26,8 @@ from homeassistant.helpers.event import async_call_later, async_track_time_inter
 
 from .const import (
     CONF_CONTROLLER_UNIQUE_ID,
+    CONF_ENABLED_PLATFORMS,
+    DEFAULT_ENABLED_PLATFORMS,
     DOMAIN,
     TOKEN_REFRESH_WINDOW_SEC,
     TOKEN_RETRY_FIRST_SEC,
@@ -38,7 +40,13 @@ from .director_utils import update_variables_for_config_entry
 
 _LOGGER = logging.getLogger(__name__)
 
+# Every platform the integration can provide; each entry loads the enabled subset.
 PLATFORMS = [Platform.CLIMATE, Platform.COVER, Platform.LIGHT, Platform.MEDIA_PLAYER]
+
+
+def _enabled_platforms(entry: Control4ConfigEntry) -> list[Platform]:
+    enabled = entry.options.get(CONF_ENABLED_PLATFORMS, DEFAULT_ENABLED_PLATFORMS)
+    return [platform for platform in PLATFORMS if platform.value in enabled]
 
 
 def _director(hass: HomeAssistant, entry: Control4ConfigEntry, token: str) -> C4Director:
@@ -190,16 +198,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: Control4ConfigEntry) -> 
     runtime_data.director_model = director_model
     runtime_data.director_all_items = director_all_items
     runtime_data.ui_configuration = ui_configuration
+    runtime_data.platforms = _enabled_platforms(entry)
 
     # Platform setup failures are caught inside HA's own entity_platform
     # setup, never raised here, so this needs no cleanup block.
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    await hass.config_entries.async_forward_entry_setups(entry, runtime_data.platforms)
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: Control4ConfigEntry) -> bool:
     """Unload a config entry."""
-    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    unload_ok = await hass.config_entries.async_unload_platforms(
+        entry, entry.runtime_data.platforms
+    )
     if not unload_ok:
         return False
 

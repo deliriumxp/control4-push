@@ -6,7 +6,7 @@ from aiohttp.client_exceptions import ClientError
 from pyControl4.error_handling import BadCredentials, NotFound, Unauthorized
 import pytest
 
-from custom_components.control4.const import DOMAIN
+from custom_components.control4.const import CONF_ENABLED_PLATFORMS, DOMAIN
 from homeassistant.config_entries import SOURCE_USER
 from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_USERNAME
 from homeassistant.core import HomeAssistant
@@ -40,8 +40,16 @@ async def test_full_flow(
         },
     )
 
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "platforms"
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_ENABLED_PLATFORMS: ["cover", "light"]}
+    )
+
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["title"] == "control4_model_00AA00AA00AA"
+    assert result["options"] == {CONF_ENABLED_PLATFORMS: ["cover", "light"]}
     assert result["data"] == {
         CONF_HOST: MOCK_HOST,
         CONF_USERNAME: MOCK_USERNAME,
@@ -99,7 +107,8 @@ async def test_user_flow_errors(
         },
     )
 
-    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "platforms"
 
 
 @pytest.mark.parametrize(
@@ -149,7 +158,8 @@ async def test_user_flow_director_errors(
         },
     )
 
-    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "platforms"
 
 
 async def test_duplicate_entry(

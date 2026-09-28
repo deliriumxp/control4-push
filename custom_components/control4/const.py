@@ -9,6 +9,7 @@ from pyControl4.director import C4Director
 from .director_websocket import DirectorWebsocket
 
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import Platform
 from homeassistant.core import CALLBACK_TYPE
 
 DOMAIN = "control4"
@@ -32,6 +33,10 @@ class Control4RuntimeData:
     resync_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     # Variable names the platforms read; the periodic resync re-reads them in one request.
     resync_variable_names: set[str] = field(default_factory=set)
+    # What async_setup_entry actually forwarded. Unload must use this, not the
+    # options: the options flow saves new options *before* its reload unloads, so
+    # a just-enabled platform would be "unloaded" without ever having been loaded.
+    platforms: list[Platform] = field(default_factory=list)
 
 
 type Control4ConfigEntry = ConfigEntry[Control4RuntimeData]
@@ -39,6 +44,28 @@ type Control4ConfigEntry = ConfigEntry[Control4RuntimeData]
 CONF_CONTROLLER_UNIQUE_ID = "controller_unique_id"
 
 CONTROL4_ENTITY_TYPE = 7
+CONTROL4_COVER_CATEGORY = "blinds_shades"
+
+# Entity types a household imports: lights/climate may already come from KNX etc.
+CONF_ENABLED_PLATFORMS = "enabled_platforms"
+
+# Item IDs (as strings, for JSON/options-flow storage) of covers that are
+# driven by a dry contact / relay with no real position feedback. For these,
+# Control4's reported status is shown but must never gate the open/close
+# buttons - see Control4Cover.assumed_state in cover.py.
+CONF_DRY_CONTACT_COVERS = "dry_contact_covers"
+
+# value -> display label, in the order shown in the flows.
+AVAILABLE_PLATFORMS = {
+    Platform.COVER.value: "Covers (blinds/shades)",
+    Platform.LIGHT.value: "Lights",
+    Platform.CLIMATE.value: "Climate",
+    Platform.MEDIA_PLAYER.value: "Media players",
+}
+
+# All of them, as the built-in integration: an entry installed over it (no options
+# yet) keeps every entity it had.
+DEFAULT_ENABLED_PLATFORMS = list(AVAILABLE_PLATFORMS)
 
 # Director token lifecycle (token_store.py). The token lives validSeconds (24 h).
 CONF_TOKEN_EXPIRES = "token_expires"
